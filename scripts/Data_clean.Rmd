@@ -1,0 +1,266 @@
+---
+title: "Clean data"
+author: "Camila Diaz"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+
+```{r libraries}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(sf)
+library(geodata)
+```
+
+# Code overview
+
+This document creates a **presence-absence dataset** for the Monarch butterfly
+(*Danaus plexippus*) from a complete-checklist citizen science dataset.  
+
+- **Presences**: checklists where the Monarch was recorded  
+- **Absences**: completed checklists in the same season where no Monarch was reported  
+- **Season filter**: June, July, and August (core North American breeding season)  
+
+
+```{r, message=FALSE, warning=FALSE}
+# Load data
+dat <- read.csv("C:/Users/maria/Documents/Chapter1/bayesian_model/data/species/records_clean_gbif.csv")
+
+summary_table <- data.frame(
+  column_name = names(dat),
+  unique_values = sapply(dat, function(x) length(unique(x))),
+  na_count = sapply(dat, function(x) sum(is.na(x)))
+)
+
+
+```
+
+## Filter to the breeding season  
+
+We retain only records from **June (6), July (7), and August (8)**, which
+represent the core summer breeding window for Monarchs across North America.
+
+
+```{r breeding-season}
+breeding_months <- 6:8
+
+breeding_checklists <- dat |>
+  filter(month %in% breeding_months)
+
+cat("Checklists in breeding season:", n_distinct(breeding_checklists$Checklist.ID), "\n")
+
+```
+
+## Identify Monarch presences  
+
+Extract all checklist IDs where *Danaus plexippus* was recorded.  
+Each unique checklist ID gets a `presence = 1` flag.
+
+```{r monarch-presences, message = FALSE}
+monarch_present <- breeding_checklists |>
+  dplyr::filter(Species_name == "Danaus plexippus") |>  # adjust if spelling differs
+  dplyr::select(Checklist.ID) |>
+  distinct() |>
+  mutate(presence = 1)
+
+cat("Checklists with Monarch present:", nrow(monarch_present), "\n")
+```
+
+## Build checklist-level metadata
+
+Each checklist may contain many species rows, but spatial and temporal information is constant within a checklist. We collapse to one row per checklist using `slice(1)`.
+
+```{r checklist-metadata}
+checklist_meta <- breeding_checklists |>
+  group_by(Checklist.ID) |>
+  slice(1) |>
+  ungroup() |>
+  dplyr::select(Checklist.ID, Site.ID, Latitude, Longitude,
+         year, month, Sampling.protocol, Party.Size, Observer)
+```
+
+## Create the presence-absence dataset
+
+A left join assigns `presence = 1` to checklists where the Monarch was seen.  
+All unmatched checklists receive `NA`, which is then replaced with `0` (confirmed absence — the observer was present but did not record the species).
+
+```{r presence-absence}
+presence_absence <- checklist_meta |>
+  left_join(monarch_present, by = "Checklist.ID") |>
+  mutate(presence = replace_na(presence, 0))
+```
+
+## Sanity check
+
+Verify the counts and prevalence before proceeding to modelling.
+
+```{r sanity-check}
+cat("Total checklists (breeding season):", nrow(presence_absence), "\n")
+cat("Presence (1):                     ", sum(presence_absence$presence == 1), "\n")
+cat("Absence  (0):                     ", sum(presence_absence$presence == 0), "\n")
+cat("Prevalence (%):                   ",
+    round(mean(presence_absence$presence) * 100, 2), "\n")
+```
+
+## Map presence and absence
+
+The map below shows all breeding-season checklists. Orange points are sites
+where the Monarch was recorded; grey points are sites where checklists were
+completed but no Monarch was observed. Point transparency is set to
+`alpha = 0.4` to reveal spatial density in heavily sampled areas.
+
+
+```{r presence-absence2, fig.width=9, fig.height=5.5}
+# Factor with absence first so presences plot on top
+presence_absence$presence_f <- factor(
+  presence_absence$presence,
+  levels = c(0, 1),
+  labels = c("Absence", "Presence")
+)
+
+dat_spatial <- st_as_sf(presence_absence, 
+                        coords = c("Longitude", "Latitude"), 
+                        crs = 4326)
+
+study_area0 <- st_read("C:/Users/maria/Documents/Chapter1/bayesian_model/data/study_area/canada.shp")
+
+PA_data <- st_intersection(dat_spatial, study_area0)
+
+cat("Total checklists (breeding season):", nrow(PA_data), "\n")
+cat("Presence (1):                     ", sum(PA_data$presence == 1), "\n")
+cat("Absence  (0):                     ", sum(PA_data$presence == 0), "\n")
+cat("Prevalence (%):                   ",
+    round(mean(PA_data$presence) * 100, 2), "\n")
+
+
+```
+
+
+```{r plot-presence-absence, fig.width=9, fig.height=5.5}
+epsg = 3857
+study_area0 <- study_area0 |>
+  st_transform(crs = epsg)
+
+PA_data <- PA_data |>
+  st_transform(crs = epsg)
+
+
+m <- ggplot() +
+  geom_sf(data = study_area0, fill = "grey95", color = "grey70") +
+  geom_sf(data = PA_data, aes(colour = presence_f), alpha = 0.4, size = 0.8, shape = 16) +
+  scale_colour_manual(
+    name   = NULL,
+    values = c("Absence"  = "#888780",
+               "Presence" = "#D85A30"),
+    guide  = guide_legend(override.aes = list(size = 3, alpha = 1))
+  ) +
+  labs(
+    title    = "Danaus plexippus — breeding season checklists",
+    subtitle = "June – August | presence-absence from complete checklists"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position   = "bottom",
+    axis.text         = element_blank(),
+    plot.title        = element_text(face = "bold"),
+    plot.subtitle     = element_text(colour = "grey40"),
+    panel.grid        = element_blank()
+  )
+m
+
+
+```
+
+## Spatial thinning — one checklist per 1 km grid cell
+
+To reduce spatial autocorrelation and sampling bias we overlay a 1 km × 1 km
+grid and keep a single record per cell. Where a cell contains both presences
+and absences, the presence is retained — this avoids introducing false absences
+in areas where the Monarch was genuinely detected.  
+
+The workflow is:  
+
+1. Project coordinates to a metric CRS (UTM zone 18N, EPSG 32618)  
+2. Assign each point to a grid cell using integer division on the projected
+   coordinates.  
+3. Within each cell, sort so that presences come first, then keep one row.  
+
+### Create 1 km Hexagonal Grid over Study Area
+
+```{r grid-subsample}
+library(h3jsr)
+crs_quebec <- 32198
+
+occ_proj      <- st_transform(PA_data, crs_quebec)
+study_area_proj <- st_transform(study_area0, crs_quebec)
+
+hex_grid <- st_make_grid(
+  study_area_proj,
+  cellsize    = 1000,
+  what        = "polygons",
+  square      = FALSE,
+  flat_topped = TRUE
+)
+
+
+```
+
+### Spatially Join Occurrences to Grid
+
+```{r thinned-data, echo=TRUE}
+hex_sf <- st_sf(hex_id = seq_along(hex_grid), geometry = hex_grid)
+
+# Join occurrences to hexagons
+occ_hex <- st_join(occ_proj, hex_sf, join = st_within)
+
+# Thin: keep 1 record per hexagon, prioritizing presences (presence == 1)
+occ_thinned <- occ_hex %>%
+  st_drop_geometry() %>%
+  group_by(hex_id) %>%
+  arrange(desc(presence), .by_group = TRUE) %>%  # presences (1) sort before absences (0)
+  slice(1) %>%
+  ungroup()
+
+# Rejoin geometry from original data
+occ_thinned <- occ_proj %>%
+  filter(Checklist.ID %in% occ_thinned$Checklist.ID)
+
+cat("Original records:", nrow(occ_proj), "\n")
+cat("Thinned records: ", nrow(occ_thinned), "\n")
+cat("Presences kept:  ", sum(occ_thinned$presence == 1), "\n")
+cat("Absences kept:   ", sum(occ_thinned$presence == 0), "\n")
+
+#st_write(occ_thinned,"C:/Users/maria/Documents/Chapter1/bayesian_model/data/species/PA_monarch_CAN.shp")
+
+```
+
+
+
+```{r plot-thinned-data, fig.width=9, fig.height=5.5}
+
+m <- ggplot() +
+  geom_sf(data = study_area, fill = "grey83", color = "black") +
+  geom_sf(data = PA_data, aes(colour = presence_f), alpha = 0.4, size = 2, shape = 16) +
+  scale_colour_manual(
+    name   = NULL,
+    values = c("Absence"  = "red",
+               "Presence" = "green"),
+    guide  = guide_legend(override.aes = list(size = 3, alpha = 1))
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position   = "bottom",
+    axis.text         = element_blank(),
+    panel.grid        = element_blank()
+  )
+m
+ggsave(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/data_100.png"), plot = m, width = 8, height = 8, dpi = 300)
+```
