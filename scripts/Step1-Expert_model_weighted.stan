@@ -1,15 +1,12 @@
-// Option 2 — Weighted likelihood model
+// Weighted likelihood model
 // Each expert point contributes to the likelihood proportionally to its
 // confidence weight, so low-confidence points have less influence on the
 // posterior than high-confidence ones.
-//   High -> w = 1.00, Medium -> w = 0.50, Low -> w = 0.25
-//
-// Note: log_lik in generated quantities uses the unweighted likelihood
-// so that LOO-CV evaluates true predictive accuracy, not the weighted score.
+
 
 data {
   int<lower=0> N;
-  array[N] int<lower=0, upper=1> y;   // presence (1) / absence (0)
+  array[N] int<lower=0, upper=1> y;   
 
   vector[N] x1;
   vector[N] x2;
@@ -29,12 +26,6 @@ data {
   real<lower=0> sigma_a2;
   real<lower=0> sigma_b2;
   real<lower=0> sigma_c2;
-
-  // Priors on slopes
-  real beta1_mu;
-  real<lower=0> beta1_sigma;
-  real beta2_mu;
-  real<lower=0> beta2_sigma;
 
   // Per-point confidence weights
   vector<lower=0, upper=1>[N] w;
@@ -97,8 +88,8 @@ model {
 
   // Slope priors
   alpha  ~ normal(0, 1);
-  beta1  ~ normal(beta1_mu, beta1_sigma);
-  beta2  ~ normal(beta2_mu, beta2_sigma);
+  beta1  ~ normal(0, 1);
+  beta2  ~ normal(0, 1);
 
   // Weighted Bernoulli likelihood:
   // Each observation contributes w[n] times its log-likelihood,
