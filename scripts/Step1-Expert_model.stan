@@ -23,11 +23,6 @@ data {
   real<lower=0> sigma_b2; 
   real<lower=0> sigma_c2;
 
-  // Priors on slopes
-  real beta1_mu; 
-  real<lower=0> beta1_sigma;
-  real beta2_mu; 
-  real<lower=0> beta2_sigma;
 }
 
 parameters {
@@ -90,8 +85,8 @@ model {
 
   // --- Slope priors (expert direction + confidence) ---
   alpha  ~ normal(0, 1);
-  beta1  ~ normal(beta1_mu, beta1_sigma);
-  beta2  ~ normal(beta2_mu, beta2_sigma);
+  beta1  ~ normal(0, 1);
+  beta2  ~ normal(0, 1);
 
   // --- Likelihood ---
   y ~ bernoulli_logit(alpha + beta1 * f1 + beta2 * f2);
