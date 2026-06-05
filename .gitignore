@@ -47,3 +47,27 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# Ignore one specific file
+data/species/Dplexippus-occurrence.csv"
+
+# Ignore all files in a folder
+data/species/Danaus_plexippus-GBIF-30-03-26/
+
+# Ignore all TIFF raster and shapefiles files
+*.tif
+*.tiff
+*.shp
+*.dbf
+*.prj
+*.shx
+
+
+# Ignore temporary R files
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+# Ignore R Markdown cache folders
+*_cache/
