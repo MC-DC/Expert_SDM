@@ -1,5 +1,5 @@
 ---
-title: "Expert knowledge integration in species distribution model (SDM) - A Bayesian approach"
+title: "Expert knowledge integration in species distribution model (SDM): A Bayesian approach"
 author: "Camila Diaz"
 date: "`r Sys.Date()`"
 output: html_document
@@ -24,9 +24,9 @@ knitr::opts_knit$set(
 
 This document implements a two-step Bayesian species distribution model (SDM) for monarch butterfly (*Danaus plexippus*) in Canada.
 
-**Step 1 — Expert-knowledge model (Stan).** Expert-elicited range limits and point observations are used to define an expert-informed prior and a small occurrence dataset. Three Stan variants are compared: a baseline logistic model, a misclassification model that treats low-confidence labels as imperfect, and a weighted-likelihood model that down-weights low-confidence points. The posterior distributions of the regression coefficients are then extracted.
+**Step 1: Expert-knowledge model (Stan).** Expert-elicited range limits and point observations are used to define an expert-informed prior and a small occurrence dataset. Two Stan variants are compared: a baseline logistic model and a weighted-likelihood model that down-weights low-confidence points. The posterior distributions of the regression coefficients are then extracted.
 
-**Step 2 — Model update with occurrence data (INLA).** The Stan posteriors are propagated as Gaussian priors into an R-INLA binomial model that includes a spatial random effect (SPDE/Matérn). The workflow is also run with non-informative priors to provide a baseline comparison.
+**Step 2: Model update with occurrence data (INLA).** The Stan posteriors are propagated as Gaussian priors into an R-INLA binomial model that includes a spatial random effect (SPDE/Matérn). The workflow is also run with non-informative priors to provide a baseline comparison.
 
 ---
 
@@ -43,8 +43,6 @@ library(terra)
 
 ```
 
-`sf` handles all vector spatial operations (read/transform/intersect); `terra` handles raster operations; `INLA` fits the spatial Bayesian model in Step 2; `dplyr`/`tidyr` handle tabular data wrangling; `ggplot2` produces maps.
-
 ---
 
 # 2. Data loading
@@ -55,29 +53,29 @@ epsg = 3857
 epsg_crs = "EPSG:3857"
 
 # Study area
-study_area0 <- st_read("C:/Users/maria/Documents/Chapter1/bayesian_model/data/study_area/canada.shp",
+study_area0 <- st_read("C:/Users/maria/Documents/GitHub/Expert_SDM/data/study_area/canada.shp",
   quiet = TRUE)
 
 study_area <- study_area0 |>
   st_transform(epsg) |>
   st_union()|>
-  st_simplify(dTolerance = 1000)|> # 1 km tolerance in EPSG:3857
+  st_simplify(dTolerance = 1000)|> # 1 km tolerance
   st_make_valid()
 
 # Occurrence data
-monarch_data <- st_read("C:/Users/maria/Documents/Chapter1/bayesian_model/data/species/PA_monarch_CAN.shp",
-  quiet = TRUE) #en 
+monarch_data <- st_read("C:/Users/maria/Documents/GitHub/Expert_SDM/data/species/PA_monarch_CAN.shp",
+  quiet = TRUE)
 
 monarch_sf <- monarch_data |>
   st_transform(crs = epsg)
 
 # Expert knowledge data
-ek_pnt <- read.csv("C:/Users/maria/Documents/Chapter1/bayesian_model/data/expert_knowledge/Points.csv")
-ek_answrs <- read.csv("C:/Users/maria/Documents/Chapter1/bayesian_model/data/expert_knowledge/Responses.csv")
+ek_pnt <- read.csv("C:/Users/maria/Documents/GitHub/Expert_SDM/data/expert_knowledge/Points.csv")
+ek_answrs <- read.csv("C:/Users/maria/Documents/GitHub/Expert_SDM/data/expert_knowledge/Responses.csv")
 
 # Environmental layers - Ouranos
-tas_mean0 <- rast("C:/Users/maria/Documents/Chapter1/bayesian_model/data/predictors/tas_mean.tif")
-pr_mean0 <- rast("C:/Users/maria/Documents/Chapter1/bayesian_model/data/predictors/pr_mean.tif")
+tas_mean0 <- rast("C:/Users/maria/Documents/GitHub/Expert_SDM/data/predictors/tas_mean.tif")
+pr_mean0 <- rast("C:/Users/maria/Documents/GitHub/Expert_SDM/data/predictors/pr_mean.tif")
 
 ```
 
@@ -85,7 +83,7 @@ Four data sources are loaded:
 
 | Object | Contents |
 |---|---|
-| `study_area` | Canada polygon, dissolved and simplified to 1 km, in EPSG:3857 (Web Mercator, units = metres) |
+| `study_area` | Canada polygon, in EPSG:3857 |
 | `monarch_sf` | Presence/absence occurrence records, reprojected to EPSG:3857 |
 | `ek_pnt` | Expert-elicited point locations with label (`presence`/`avoid`) and confidence level |
 | `ek_answrs` | Expert-elicited range limits for temperature and precipitation (one row per survey response) |
@@ -115,8 +113,6 @@ std_pr <- (pr_mask - mp) / sp
 env <- c(std_tas, std_pr)
 names(env) <- c("temp", "prec")
 
-env
-
 env_df <- as.data.frame(env, xy = TRUE, na.rm = FALSE)
 
 # Track which cells are non-NA
@@ -124,13 +120,13 @@ valid_idx <- complete.cases(env_df[, c("temp", "prec")])
 env_valid <- env_df[valid_idx, ]
 ```
 
-Each raster is reprojected to EPSG:3857 and clipped to the study area before standardising. Standardisation centres and scales each layer to zero mean and unit standard deviation across all non-NA cells within the study area:
+Each raster is reprojected to EPSG:3857 and clipped to the study area before standardizing. Standardization centers and scales each layer to zero mean and unit standard deviation across all non-NA cells within the study area:
 
 $$z_i = \frac{x_i - \bar{x}}{s_x}$$
 
-where $\bar{x}$ and $s_x$ are the study-area-wide mean and standard deviation. This places both covariates on a common scale so that the expert-elicited range limits (which are expressed in the original units) can be expressed in the same standardised units before being passed to Stan. The vectors `mt`, `st`, `mp`, `sp` are saved and reused in the `expert-knowledge` chunk to standardise the expert responses with the same transformation.
+where $\bar{x}$ and $s_x$ are the mean and standard deviation. This places both covariates on a common scale when they enter the model. The vectors `mt`, `st`, `mp`, `sp` are saved and reused in the `expert-knowledge` chunk to standardize the expert responses with the same transformation.
 
-`valid_idx` flags the raster cells that have non-missing values for both covariates; it is reused later to populate prediction rasters from a flat vector of predictions.
+`valid_idx` flags the raster cells with non-missing values for both covariates and is later used to fill prediction rasters from a flat prediction vector.
 
 ---
 
@@ -145,7 +141,6 @@ sf_pnt <- ek_pnt |>
   st_intersection(study_area0) |>
   st_transform(crs = epsg)
 
-head(sf_pnt, 5)
 
 sf_pnt <- sf_pnt |>
   mutate(y = as.integer(type == "presence"),
@@ -178,9 +173,9 @@ m <- ggplot() +
     panel.grid        = element_blank()
   )
 m
-#ggsave(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/data_surveys.png"), plot = m, width = 8, height = 8, dpi = 300)
+#ggsave(paste0("C:/Users/maria/Documents/GitHub/Expert_SDM/results/data_surveys.png"), plot = m, width = 8, height = 8, dpi = 300)
 
-# standarize range values and Keep the necessary columns
+# standardize range values and Keep the necessary columns
 answrs_select <- ek_answrs |>
   mutate(std_min_temp = (min.temp - mt) / st,
          std_max_temp = (max.temp - mt) / st,
@@ -190,21 +185,20 @@ answrs_select <- ek_answrs |>
 
 ```
 
-This chunk converts the expert data into two model-ready objects.
 
-**Expert points** (`sf_pnt`). The raw CSV coordinates are converted to an `sf` object in WGS 84, clipped to the study area, then reprojected. The binary response is defined as $y_n = 1$ if the label is `"presence"` and $y_n = 0$ otherwise. Standardised temperature and precipitation values are extracted at each point from the `env` stack.
+**Expert points** (`sf_pnt`). The raw CSV coordinates are converted to an `sf` object, clipped to the study area, then reprojected. The binary response is defined as $y_n = 1$ if the label is `"presence"` and $y_n = 0$ otherwise. Standardized temperature and precipitation values are extracted at each point from the `env` stack.
 
-**Confidence → model quantities.** Each point carries a self-assessed confidence level (`Low`, `Medium`, `High`). This is mapped to two different model quantities depending on which Stan variant is used:
+**Confidence = model quantities.** Each point carries a self-assessed confidence level (`Low`, `Medium`, `High`). This is mapped in the Weighted likelihood model:
 
-| Confidence | `sens` / `spec` | `w` |
-|---|---|---|
-| Low | 0.60 | 0.25 |
-| Medium | 0.80 | 0.50 |
-| High | 0.95 | 1.00 |
+| Confidence | `w` |
+|---|---|
+| Low | 0.25 |
+| Medium | 0.50 |
+| High | 1.00 |
 
-`sens` and `spec` feed the misclassification model (Option 1); `w` feeds the weighted-likelihood model (Option 2).
+`w` feeds the weighted-likelihood model.
 
-**Expert range responses** (`answrs_select`). The elicited minimum and maximum values for temperature and precipitation are standardised with the same $\bar{x}$ and $s_x$ used for the rasters, so they are directly comparable to the standardised covariate values. These become the prior centres $a_k^*$, $b_k^*$, $c_k^*$ for the triangular response function (see §5).
+**Expert range responses:** The elicited minimum and maximum values for temperature and precipitation are standardized with the same $\bar{x}$ and $s_x$ used for the rasters, so they are directly comparable to the standardized covariate values. These become the prior centres $a_k^*$, $b_k^*$, $c_k^*$ for the triangular response function.
 
 ---
 
@@ -213,15 +207,12 @@ This chunk converts the expert data into two model-ready objects.
 Using Stan to run step 1, expert informed model
 
 ```{r EK-stan-data}
-# Cache compiled Stan C++ to disk so subsequent knits skip recompilation
-# (~2-3 min saved per model). The .rds files are written next to the .stan files.
 library(posterior)
-library(loo)
 library(rstan)
+
 rstan_options(auto_write = TRUE)
 
 sigma_levels <- c(low = 0.01, medium = 0.5, high = 1.0)
-sigma_levels
 
 # Base data shared by all Stan models
 stan_data_base <- list(
@@ -234,28 +225,21 @@ stan_data_base <- list(
   a1_star  = answrs_select$std_min_temp,
   b1_star  = answrs_select$std_max_temp,
   c1_star  = (answrs_select$std_max_temp / 2),
-  sigma_a1 = sigma_levels["medium"],
-  sigma_b1 = sigma_levels["low"],
-  sigma_c1 = sigma_levels["medium"],
+  sigma_a1 = sigma_levels["medium"], #make it so it takes the info from the table
+  sigma_b1 = sigma_levels["low"], #make it so it takes the info from the table
+  sigma_c1 = sigma_levels["medium"], #make it so it takes the info from the table
 
   # Covariate 2 expert values + uncertainty
   a2_star  = answrs_select$std_min_prec,
   b2_star  = answrs_select$std_max_prec,
   c2_star  = (answrs_select$std_max_prec / 2),
-  sigma_a2 = sigma_levels["low"],
-  sigma_b2 = sigma_levels["low"],
-  sigma_c2 = sigma_levels["low"],
-
-  # Slope priors (both positive effects expected)
-  beta1_mu    = 1,
-  beta1_sigma = sigma_levels["medium"],
-  beta2_mu    = 1,
-  beta2_sigma = sigma_levels["medium"]
+  sigma_a2 = sigma_levels["low"],#make it so it takes the info from the table
+  sigma_b2 = sigma_levels["low"],#make it so it takes the info from the table
+  sigma_c2 = sigma_levels["low"]#make it so it takes the info from the table
 )
 
-# Original model (no confidence weighting — baseline)
+# Original model (baseline)
 stan_data <- stan_data_base
-
 
 # weighted likelihood model (weight per point)
 stan_data_weighted <- c(
@@ -264,56 +248,6 @@ stan_data_weighted <- c(
 )
 ```
 
-Two data lists are assembled, all sharing a common base. The base contains:
-
-- `N`, `y`, `x1`, `x2` — the expert point dataset.
-- Triangular shape priors for each covariate: the expert-elicited **lower limit** $a_k^*$, **upper limit** $b_k^*$, and implied **mode** $c_k^* = b_k^*/2$ (in standardised units), together with their uncertainty levels `sigma_*`.
-- Slope direction priors (`beta1_mu = 1`, `beta2_mu = 1`) encoding the expectation that both temperature and precipitation have a positive association with occurrence probability.
-
-`sigma_levels` encodes three qualitative uncertainty tiers (`low = 0.01`, `medium = 0.5`, `high = 1.0`). A tighter sigma means the Stan sampler is constrained to stay near the expert-stated value; a wider sigma allows more learning from the data. The minimum temperature bound $b_1^*$ is assigned `sigma_low` (tight) because experts are typically more certain about hard upper limits; the lower bound $a_1^*$ and mode $c_1^*$ are given `sigma_medium`.
-
-The two option-specific lists append `sens`/`spec` vectors (Option 1) or `w` weights (Option 2) to the shared base.
-
----
-
-# 6. Stan Model — Baseline
-
-## Model specification
-
-All three Stan models share the same core statistical structure. The observed binary response $y_n \in \{0, 1\}$ at expert point $n$ is modelled as:
-
-$$y_n \sim \text{Bernoulli}(p_n)$$
-
-$$\text{logit}(p_n) = \alpha + \beta_1\, f_1(x_{1n}) + \beta_2\, f_2(x_{2n})$$
-
-where $f_k(\cdot)$ is a **triangular response function** that encodes the expert's belief that the species has a unimodal suitability response within the range $[a_k, b_k]$ with peak at the mode $c_k$:
-
-$$f_k(x;\, a_k, c_k, b_k) = \begin{cases} 0 & x < a_k \text{ or } x > b_k \\ \dfrac{2(x - a_k)}{(b_k - a_k)(c_k - a_k)} & a_k \leq x \leq c_k \\[6pt] \dfrac{2(b_k - x)}{(b_k - a_k)(b_k - c_k)} & c_k < x \leq b_k \end{cases}$$
-
-The function equals 0 outside $[a_k, b_k]$ and reaches a maximum of 1 at $x = c_k$.
-
-## Ordered parameterisation
-
-Stan requires the constraint $a_k < c_k < b_k$ to be enforced explicitly. This is done by sampling **log-gap** parameters and exponentiating:
-
-$$a_k = a_{k,\text{raw}}$$
-$$c_k = a_k + \exp(\text{log\_gap}_{c_k})$$
-$$b_k = c_k + \exp(\text{log\_gap}_{b_k})$$
-
-Because $\exp(\cdot) > 0$, the ordering $a_k < c_k < b_k$ is guaranteed for all sample values.
-
-## Priors
-
-The shape parameters are given Gaussian priors centred on the expert-elicited values (in standardised units):
-
-$$a_{k,\text{raw}} \sim \mathcal{N}(a_k^*, \sigma_{a_k})$$
-$$\log(c_k - a_k) \sim \mathcal{N}\!\left(\log(c_k^* - a_k^*),\; \sigma_{c_k}\right)$$
-$$\log(b_k - c_k) \sim \mathcal{N}\!\left(\log(b_k^* - c_k^*),\; \sigma_{b_k}\right)$$
-
-The intercept and slope priors encode expected positive effects:
-
-$$\alpha \sim \mathcal{N}(0, 1)$$
-$$\beta_k \sim \mathcal{N}(\mu_{\beta_k},\, \sigma_{\beta_k})$$
 
 ```{r EK-model-stan, cache = TRUE, cache.lazy = FALSE, message=FALSE, warning=FALSE}
 # --- Baseline model (no confidence, original) ---
@@ -331,17 +265,62 @@ fit <- sampling(stan_code,
 print(fit, pars = c("beta1", "beta2"))
 ```
 
-`stan_model()` compiles the Stan source code to C++. `sampling()` runs the No-U-Turn Sampler (NUTS), a variant of Hamiltonian Monte Carlo, with 4 independent chains (default 2000 iterations each, 1000 warm-up). NUTS adaptively tunes the step size and trajectory length so no manual tuning is needed.
+Two data lists are assembled, all sharing a common base. The base contains:
 
-The `generated quantities` block in the Stan file computes two diagnostics per draw:
+- `N`, `y`, `x1`, `x2`: the expert point dataset.
+- Triangular shape priors for each covariate: the expert-elicited **lower limit** $a_k^*$, **upper limit** $b_k^*$, and implied **mode** $c_k^* = b_k^*/2$ (in standardized units), together with their uncertainty levels `sigma_*`.
+- Slope direction priors (`beta1_mu = 1`, `beta2_mu = 1`) encoding the expectation that both temperature and precipitation have a positive association with occurrence probability.
 
-- `y_rep[n]` — posterior predictive replicate (for graphical posterior predictive checks).
-- `log_lik[n]` — observation-level log-likelihood (for LOO-CV model comparison).
+`sigma_levels` encodes three qualitative uncertainty tiers (`low = 0.01`, `medium = 0.5`, `high = 1.0`). A tighter sigma means the Stan sampler is constrained to stay near the expert-stated value; a wider sigma allows more learning from the data. As an example here we set the minimum temperature bound $b_1^*$ as `sigma_low` (tight) because implying experts are more certain about hard upper limits; the lower bound $a_1^*$ and mode $c_1^*$ are given `sigma_medium`.
+
+The two option-specific lists append `w` weights (for the weighted-likelihood model) to the shared base.
+
+---
+
+# 6. Baseline Model (Stan script)
+
+## Model specification
+
+The two Stan models share the same core statistical structure. The observed binary response $y_n \in \{0, 1\}$ at expert point $n$ is modelled as:
+
+$$y_n \sim \text{Bernoulli}(p_n)$$
+
+$$\text{logit}(p_n) = \alpha + \beta_k\, f_k(x_{kn})$$
+
+where $\alpha$ is the intercept, $x_k$ are $k$ amount of predictor variables and,  $f_k(\cdot)$ is a **triangular response function** that encodes the expert's belief that the species has a unimodal suitability response within the range $[a_k, b_k]$ with peak at the mode $c_k$:
+
+$$f_k(x;\, a_k, c_k, b_k) = \begin{cases} 0 & x < a_k \text{ or } x > b_k \\ \dfrac{2(x - a_k)}{(b_k - a_k)(c_k - a_k)} & a_k \leq x \leq c_k \\[6pt] \dfrac{2(b_k - x)}{(b_k - a_k)(b_k - c_k)} & c_k < x \leq b_k \end{cases}$$
+
+The function equals 0 outside $[a_k, b_k]$ and reaches a maximum of 1 at $x = c_k$.
+
+## Ordered parameterisation
+
+Stan requires the constraint $a_k < c_k < b_k$ to be enforced explicitly. This is done by sampling **log-gap** parameters and exponentiation:
+
+$$a_k = a_{k,\text{raw}}$$
+$$c_k = a_k + \exp(\text{log\_gap}_{c_k})$$
+$$b_k = c_k + \exp(\text{log\_gap}_{b_k})$$
+
+Because $\exp(\cdot) > 0$, the ordering $a_k < c_k < b_k$ is guaranteed for all sample values.
+
+## Priors
+
+The shape parameters are given Gaussian priors centred on the expert-elicited values (in standardised units):
+
+$$a_{k,\text{raw}} \sim \mathcal{N}(a_k^*, \sigma_{a_k})$$
+$$\log(c_k - a_k) \sim \mathcal{N}\!\left(\log(c_k^* - a_k^*),\; \sigma_{c_k}\right)$$
+$$\log(b_k - c_k) \sim \mathcal{N}\!\left(\log(b_k^* - c_k^*),\; \sigma_{b_k}\right)$$
+
+The intercept and slope priors are set to non-informative
+
+$$\alpha \sim \mathcal{N}(0, 1)$$
+$$\beta_k \sim \mathcal{N}(0, 1)$$
 
 
 ---
 
-# 7. Stan Model — Option 2: Weighted likelihood
+# 7. Weighted-Likelihood Model (Stan script)
+
 Each point contributes to the log-posterior proportionally to its confidence weight (High=1, Medium=0.5, Low=0.25), treating low-confidence points as fractional observations.  
 
 Reference: Isaac et al. (2014), Botella et al. (2020)
@@ -368,10 +347,6 @@ $$\log p(\mathbf{y} \mid \boldsymbol{\theta}) = \sum_{n=1}^N w_n \log p(y_n \mid
 
 where $w_n \in \{0.25, 0.50, 1.00\}$ for Low, Medium, and High confidence respectively. A point with $w_n = 0.25$ contributes only one-quarter as much to the log-posterior as a high-confidence point, so it has proportionally less influence on the shape of the posterior. This is equivalent to treating it as a fractional observation.
 
-In Stan this is written as `target += w[n] * bernoulli_logit_lpmf(y[n] | mu)`.
-
-> **LOO note:** `log_lik` in `generated quantities` uses the **unweighted** likelihood in all two models so that LOO-CV scores reflect true predictive accuracy on held-out data, not the training-time weighting scheme.
-
 ---
 
 # 8. HMC Diagnostics
@@ -385,7 +360,7 @@ print(fit, pars = c("alpha", "beta1", "beta2",
       probs = c(0.025, 0.5, 0.975))
 
 
-# Option 1 — weighted
+# Weighted
 check_hmc_diagnostics(fit_weighted)
 print(fit_weighted, pars = c("alpha", "beta1", "beta2",
                               "a1", "c1", "b1",
@@ -406,33 +381,9 @@ print(fit_weighted, pars = c("alpha", "beta1", "beta2",
 
 ---
 
-# 9. Model comparison with LOO-CV
-
-```{r EK-loo}
-# LOO uses the unweighted log_lik in all models so scores are comparable
-loo_baseline  <- loo(extract_log_lik(fit,          parameter_name = "log_lik"))
-loo_weighted  <- loo(extract_log_lik(fit_weighted, parameter_name = "log_lik"))
-
-print(loo_baseline)
-print(loo_weighted)
-
-loo_compare(loo_baseline, loo_weighted)
-```
-
-Leave-one-out cross-validation (LOO-CV) estimates each model's out-of-sample predictive accuracy using Pareto-smoothed importance sampling (PSIS-LOO; Vehtari et al., 2017). The key reported quantity is:
-
-$$\widehat{\text{elpd}}_{\text{loo}} = \sum_{n=1}^N \log p(y_n \mid \mathbf{y}_{-n})$$
-
-where $p(y_n \mid \mathbf{y}_{-n})$ is the leave-one-out predictive density estimated without refitting the model. Higher (less negative) values indicate better predictive accuracy.
-
-`loo_compare()` ranks all three models: the top model is printed first and differences in $\widehat{\text{elpd}}$ with standard errors are shown, so the comparison accounts for Monte Carlo uncertainty. Because `log_lik` is computed with the **unweighted** likelihood in all three Stan files, the scores are on the same scale and directly comparable.
-
----
-
-# 10. Prediction helpers
+# 9. Calculate the expert informed model prediction
 
 ```{r EK-predict-function}
-# Shared helpers — work for all fitted Stan objects
 
 tri <- function(x, a, b, c) {
   ifelse(x < a | x > b, 0,
@@ -478,7 +429,6 @@ sd_baseline <- predict_sd(fit,          env_valid$temp, env_valid$prec)
 sd_weighted <- predict_sd(fit_weighted, env_valid$temp, env_valid$prec)
 ```
 
-Three helpers are defined here and reused for all fitted models.
 
 **`tri(x, a, b, c)`** — the triangular response function evaluated in R for prediction (mirrors the Stan `transformed parameters` block). It is vectorised over `x` and accepts matrices for `a`, `b`, `c` so it can operate on the full posterior draw matrix at once.
 
@@ -494,11 +444,10 @@ $$\bar{p}_i = \frac{1}{S} \sum_{s=1}^S \hat{p}_i^{(s)}$$
 
 $$\text{SD}_i = \sqrt{\frac{1}{S-1} \sum_{s=1}^S \left(\hat{p}_i^{(s)} - \bar{p}_i\right)^2}$$
 
-**`make_pred_raster(preds, template_rast, valid_idx)`** — inserts the flat prediction vector back into a raster by writing values only to the non-NA cells identified by `valid_idx`, then crops to the non-NA extent. This reconstructs the spatial map from the vector form used during prediction.
 
 ---
 
-# 11. Predicted occurrence maps (Step 1 — expert only)
+# 10. Predicted occurrence maps (Step 1: expert only)
 
 ```{r EK-model}
 
@@ -520,7 +469,7 @@ Two side-by-side occurrence probability maps are produced for the Step 1 expert-
 
 ---
 
-# 12. Posterior uncertainty maps (Step 1 — expert only)
+# 11. Posterior uncertainty maps (Step 1: expert only)
 
 ```{r EK-sd}
 # --- Posterior SD maps ---
@@ -538,18 +487,18 @@ plot(sd_cropped_weighted,
      col  = hcl.colors(100, "Reds"), range = c(0, 0.2),axes = FALSE, box = FALSE)
 ```
 
-The posterior SD maps visualise parameter uncertainty propagated through to the occurrence probability scale. High SD at a pixel indicates that the posterior draws produce a wide spread of $\hat{p}_i^{(s)}$ values — either because the covariates at that location are near the edges of the expert-elicited range, or because the regression coefficients themselves are poorly determined. The colour scale is fixed at $[0, 0.2]$ across all three variants to allow direct visual comparison.
+The posterior SD maps visualise parameter uncertainty propagated through to the occurrence probability scale. High SD at a pixel indicates that the posterior draws produce a wide spread of $\hat{p}_i^{(s)}$ values — either because the covariates at that location are near the edges of the expert-elicited range, or because the regression coefficients themselves are poorly determined. The color scale is fixed at $[0, 0.2]$ across all three variants to allow direct visual comparison.
 
 ---
 
-# 13. Step 2: Extracting Stan posteriors as INLA priors
+# 12. Step 2: Extracting Stan posteriors as INLA priors
 
-## INLA model - expert informed priors
+## INLA model: expert informed priors
 
 ```{r stan-summary}
 # Extract mean and SD from Stan posterior to use as INLA priors.
 # Switch `fit_for_inla` to `fit` (baseline) to use base model
-fit_for_inla <- fit_weighted   # Option 1 ( Weighted likelihood)
+fit_for_inla <- fit_weighted   #Weighted likelihood
 
 stan_fixed <- summary(fit_for_inla, pars = c("alpha", "beta1", "beta2"),
                       probs = c(0.025, 0.5, 0.975))$summary
@@ -564,7 +513,7 @@ prior_beta2_mean  <- stan_fixed["beta2",  "mean"]
 prior_beta2_sd    <- stan_fixed["beta2",  "sd"]
 ```
 
-This chunk implements the **Bayesian updating** step. The marginal posterior from the expert-only Stan model is summarised to a Gaussian approximation — mean and SD for each of the three fixed effects ($\alpha$, $\beta_1$, $\beta_2$) — and then used as the prior distribution for the corresponding parameter in the INLA model. The approximation is exact if the marginal posteriors are Gaussian (which NUTS typically produces for well-identified parameters).
+This chunk implements the **Bayesian updating** step. The marginal posterior from the expert-only Stan model is summarized to a Gaussian approximation, mean and SD for each of the three fixed effects ($\alpha$, $\beta_1$, $\beta_2$), and then used as the prior distribution for the corresponding parameter in the INLA model.
 
 
 ---
@@ -592,11 +541,11 @@ R-INLA parameterises Gaussian priors by their **precision** $\tau = 1/\sigma^2$ 
 
 $$\tau_k = \frac{1}{\sigma_k^2}$$
 
-where $\sigma_k$ is the posterior SD extracted from Stan. Each prior is a named list `list(prior = "gaussian", param = c(mean, precision))` in the format expected by `control.fixed` in `inla()`.
+where $\sigma_k$ is the posterior SD extracted from Stan. Each prior is a named list `list(prior = "gaussian", param = c(mean, precision))`.
 
 ---
 
-# 14. Occurrence data preparation for INLA
+# 13. Occurrence data preparation for INLA
 
 ```{r join-env-occ}
 
@@ -610,7 +559,7 @@ head(monarch_occ, 5)
 
 ```
 
-The monarch occurrence dataset (`monarch_sf`) is enriched with standardised covariate values extracted at each occurrence point from the `env` stack. The response variable `y` is taken from the `presenc` field. This creates the dataset used in Step 2 to update the expert-informed priors with occurrence records from biodiversity databases.
+The monarch occurrence dataset (`monarch_sf`) is supplement with standardized covariate values extracted at each occurrence point from the `env` stack. The response variable `y` is taken from the `presenc` field. This creates the dataset used in Step 2 to update the expert-informed priors with occurrence records from biodiversity databases.
 
 ---
 
@@ -629,7 +578,7 @@ A plain data frame with columns `y`, `x1`, `x2` is created for use inside the IN
 
 ---
 
-# 15. SPDE mesh and spatial random effect
+# 14. SPDE mesh and spatial random effect
 
 ```{r spde}
 # Convert points to SPDE mesh for spatial autocorrelation
@@ -650,8 +599,6 @@ mesh <- inla.mesh.2d(loc.domain = NULL,
 
 spde <- inla.spde2.pcmatern(
   mesh  = mesh,
-  #prior.range = c(500000, 0.05),
-  #prior.sigma = c(1, 0.01)
   prior.range = c(10, 0.05),
   prior.sigma = c(1, 0.05)
 )
@@ -672,7 +619,7 @@ formula <- y ~ -1 + intercept + x1 + x2 + f(s, model = spde)
 
 ```
 
-The spatial random effect accounts for residual spatial autocorrelation in occurrence records, clustering that is not explained by temperature or precipitation.
+The spatial random effect accounts for residual spatial autocorrelation in occurrence records, clustering that is not explained by the envionmental layers.
 
 **Mesh.** `inla.mesh.2d()` builds a constrained Delaunay triangulation over the study area. The inner maximum edge length is 1 % of the shorter bounding-box dimension (`edge1`); the outer buffer uses edges up to three times larger to avoid boundary effects. `min.angle = 21` prevents poorly shaped triangles that degrade numerical precision.
 
@@ -692,13 +639,13 @@ $$P(\sigma > 1) = 0.05 \quad\Rightarrow\quad \text{penalises large random-effect
 **Full model.** The INLA model for observation $n$ is:
 
 $$y_n \sim \text{Bernoulli}(p_n)$$
-$$\text{logit}(p_n) = \alpha + \beta_1 x_{1n} + \beta_2 x_{2n} + \xi(\mathbf{s}_n)$$
+$$\text{logit}(p_n) = \alpha + \beta_k x_{kn} + \xi(\mathbf{s}_n)$$
 
 The formula `y ~ -1 + intercept + x1 + x2 + f(s, model = spde)` uses an explicit intercept column (the `-1` suppresses the automatic intercept) so that the `control.fixed` prior can be applied to it by name.
 
 ---
 
-# 16. Prediction with INLA
+# 15. Prediction with INLA
 
 ```{r pred-INLA, cache = TRUE, cache.lazy = FALSE}
 
@@ -793,7 +740,7 @@ The flat prediction and SD vectors are inserted back into rasters using the same
 
 ---
 
-# 17. Non-informative priors (baseline comparison)
+# 16. Non-informative priors (baseline comparison)
 
 ## INLA model - non informed priors
 
@@ -864,6 +811,3 @@ plot(sd_cropped,
      box    = FALSE)
 ```
 
-Occurrence probability and uncertainty maps for the non-informative INLA model, produced identically to the expert-informed maps. Visual comparison between these and the `Plot-INLA` maps shows how the expert priors shift the posterior mean and reduce uncertainty, particularly in data-sparse regions where the likelihood is uninformative.
-
----
