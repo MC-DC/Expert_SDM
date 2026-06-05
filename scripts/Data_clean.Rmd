@@ -2,9 +2,7 @@
 title: "Clean data"
 author: "Camila Diaz"
 date: "`r Sys.Date()`"
-output:
-  word_document: default
-  pdf_document: default
+output: html_document
 ---
 
 ```{r setup, include=FALSE}
@@ -22,8 +20,7 @@ library(geodata)
 
 # Code overview
 
-This document creates a **presence-absence dataset** for the Monarch butterfly
-(*Danaus plexippus*) from a complete-checklist citizen science dataset.  
+This document creates a **presence-absence dataset** for the Monarch butterfly (*Danaus plexippus*) from a complete-checklist citizen science dataset.  
 
 - **Presences**: checklists where the Monarch was recorded  
 - **Absences**: completed checklists in the same season where no Monarch was reported  
@@ -32,7 +29,7 @@ This document creates a **presence-absence dataset** for the Monarch butterfly
 
 ```{r, message=FALSE, warning=FALSE}
 # Load data
-dat <- read.csv("C:/Users/maria/Documents/Chapter1/bayesian_model/data/species/records_clean_gbif.csv")
+dat <- read.csv("C:/Users/maria/Documents/GitHub/Expert_SDM/data/species/records_clean_gbif.csv")
 
 summary_table <- data.frame(
   column_name = names(dat),
@@ -45,8 +42,7 @@ summary_table <- data.frame(
 
 ## Filter to the breeding season  
 
-We retain only records from **June (6), July (7), and August (8)**, which
-represent the core summer breeding window for Monarchs across North America.
+We retain only records from **June (6), July (7), and August (8)**, which represent the core summer breeding window for Monarchs across North America.
 
 
 ```{r breeding-season}
@@ -66,7 +62,7 @@ Each unique checklist ID gets a `presence = 1` flag.
 
 ```{r monarch-presences, message = FALSE}
 monarch_present <- breeding_checklists |>
-  dplyr::filter(Species_name == "Danaus plexippus") |>  # adjust if spelling differs
+  dplyr::filter(Species_name == "Danaus plexippus") |>
   dplyr::select(Checklist.ID) |>
   distinct() |>
   mutate(presence = 1)
@@ -89,8 +85,7 @@ checklist_meta <- breeding_checklists |>
 
 ## Create the presence-absence dataset
 
-A left join assigns `presence = 1` to checklists where the Monarch was seen.  
-All unmatched checklists receive `NA`, which is then replaced with `0` (confirmed absence — the observer was present but did not record the species).
+A left join assigns `presence = 1` to checklists where the Monarch was seen. All unmatched checklists receive `NA`, which is then replaced with `0` (confirmed absence — the observer was present but did not record the species).
 
 ```{r presence-absence}
 presence_absence <- checklist_meta |>
@@ -112,10 +107,7 @@ cat("Prevalence (%):                   ",
 
 ## Map presence and absence
 
-The map below shows all breeding-season checklists. Orange points are sites
-where the Monarch was recorded; grey points are sites where checklists were
-completed but no Monarch was observed. Point transparency is set to
-`alpha = 0.4` to reveal spatial density in heavily sampled areas.
+The map below shows all breeding-season checklists. Orange points are sites where the Monarch was recorded; grey points are sites where checklists were completed but no Monarch was observed.
 
 
 ```{r presence-absence2, fig.width=9, fig.height=5.5}
@@ -130,7 +122,7 @@ dat_spatial <- st_as_sf(presence_absence,
                         coords = c("Longitude", "Latitude"), 
                         crs = 4326)
 
-study_area0 <- st_read("C:/Users/maria/Documents/Chapter1/bayesian_model/data/study_area/canada.shp")
+study_area0 <- st_read("C:/Users/maria/Documents/GitHub/Expert_SDM/data/study_area/canada.shp")
 
 PA_data <- st_intersection(dat_spatial, study_area0)
 
@@ -181,10 +173,7 @@ m
 
 ## Spatial thinning — one checklist per 1 km grid cell
 
-To reduce spatial autocorrelation and sampling bias we overlay a 1 km × 1 km
-grid and keep a single record per cell. Where a cell contains both presences
-and absences, the presence is retained — this avoids introducing false absences
-in areas where the Monarch was genuinely detected.  
+To reduce spatial autocorrelation and sampling bias we overlay a 1 km × 1 km grid and keep a single record per cell. Where a cell contains both presences and absences, the presence is retained, this avoids introducing false absences in areas where the Monarch was genuinely detected.  
 
 The workflow is:  
 
@@ -238,7 +227,7 @@ cat("Thinned records: ", nrow(occ_thinned), "\n")
 cat("Presences kept:  ", sum(occ_thinned$presence == 1), "\n")
 cat("Absences kept:   ", sum(occ_thinned$presence == 0), "\n")
 
-#st_write(occ_thinned,"C:/Users/maria/Documents/Chapter1/bayesian_model/data/species/PA_monarch_CAN.shp")
+#st_write(occ_thinned,"C:/Users/maria/Documents/GitHub/Expert_SDM/data/species/PA_monarch_CAN.shp")
 
 ```
 
@@ -247,7 +236,7 @@ cat("Absences kept:   ", sum(occ_thinned$presence == 0), "\n")
 ```{r plot-thinned-data, fig.width=9, fig.height=5.5}
 
 m <- ggplot() +
-  geom_sf(data = study_area, fill = "grey83", color = "black") +
+  geom_sf(data = study_area_proj, fill = "grey83", color = "black") +
   geom_sf(data = PA_data, aes(colour = presence_f), alpha = 0.4, size = 2, shape = 16) +
   scale_colour_manual(
     name   = NULL,
@@ -262,5 +251,5 @@ m <- ggplot() +
     panel.grid        = element_blank()
   )
 m
-ggsave(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/data_100.png"), plot = m, width = 8, height = 8, dpi = 300)
+ggsave(paste0("C:/Users/maria/Documents/GitHub/Expert_SDM/results/data_100.png"), plot = m, width = 8, height = 8, dpi = 300)
 ```
