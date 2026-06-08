@@ -78,6 +78,12 @@ Prediction maps and uncertainty (SD) maps are saved to `results/` for both the e
 - **Occurrence records:** GBIF (*Danaus plexippus*, downloaded 2026-03-30)
 - **Climate covariates:** Ouranos regional climate dataset (mean annual temperature and precipitation)
 - **Expert knowledge:** Elicited range limits and point labels collected as part of this project
+
+## Project documentation
+
+The complete workflow, code, figures, and example results are available in the
+[rendered HTML documentation](https://mc-dc.github.io/Expert_SDM/).
+
 ## Author
 
 M. Camila Diaz-Corzo
