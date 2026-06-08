@@ -353,39 +353,7 @@ where $w_n \in \{0.25, 0.50, 1.00\}$ for Low, Medium, and High confidence respec
 
 ---
 
-# 8. HMC Diagnostics
-
-```{r EK-hmc_diagnostics}
-# Baseline
-check_hmc_diagnostics(fit)
-print(fit, pars = c("alpha", "beta1", "beta2",
-                    "a1", "c1", "b1",
-                    "a2", "c2", "b2"),
-      probs = c(0.025, 0.5, 0.975))
-
-
-# Weighted
-check_hmc_diagnostics(fit_weighted)
-print(fit_weighted, pars = c("alpha", "beta1", "beta2",
-                              "a1", "c1", "b1",
-                              "a2", "c2", "b2"),
-      probs = c(0.025, 0.5, 0.975))
-```
-
-`check_hmc_diagnostics()` reports three NUTS-specific diagnostics that signal problems with the posterior geometry:
-
-| Diagnostic | Concern if… |
-|---|---|
-| **Divergent transitions** | Any divergences indicate the sampler was unable to explore part of the posterior; inferences may be biased. |
-| **Max tree depth exceeded** | The trajectory was truncated, suggesting slow mixing or a difficult geometry. |
-| **$\hat{R}$ (Rhat)** | Values $> 1.01$ indicate the chains have not converged; posterior summaries are unreliable. |
-| **Effective sample size (ESS)** | $\text{ESS} < 400$ suggests high autocorrelation and noisy posterior estimates. |
-
-`print()` reports the posterior mean, SD, and the 2.5 %, 50 %, 97.5 % quantiles for the triangular shape parameters and regression coefficients, allowing inspection of the marginal posteriors and credible intervals.
-
----
-
-# 9. Calculate the expert informed model prediction
+# 8. Calculate the expert informed model prediction
 
 ```{r EK-predict-function}
 
@@ -451,7 +419,7 @@ $$\text{SD}_i = \sqrt{\frac{1}{S-1} \sum_{s=1}^S \left(\hat{p}_i^{(s)} - \bar{p}
 
 ---
 
-# 10. Predicted occurrence maps (Step 1: expert only)
+# 9. Predicted occurrence maps (Step 1: expert only)
 
 ```{r EK-model}
 
@@ -473,7 +441,7 @@ Two side-by-side occurrence probability maps are produced for the Step 1 expert-
 
 ---
 
-# 11. Posterior uncertainty maps (Step 1: expert only)
+# 10. Posterior uncertainty maps (Step 1: expert only)
 
 ```{r EK-sd}
 # --- Posterior SD maps ---
@@ -495,7 +463,7 @@ The posterior SD maps visualise parameter uncertainty propagated through to the 
 
 ---
 
-# 12. Step 2: Extracting Stan posteriors as INLA priors
+# 11. Step 2: Extracting Stan posteriors as INLA priors
 
 ## INLA model: expert informed priors
 
@@ -549,7 +517,7 @@ where $\sigma_k$ is the posterior SD extracted from Stan. Each prior is a named 
 
 ---
 
-# 13. Occurrence data preparation for INLA
+# 12. Occurrence data preparation for INLA
 
 ```{r join-env-occ}
 
@@ -582,7 +550,7 @@ A plain data frame with columns `y`, `x1`, `x2` is created for use inside the IN
 
 ---
 
-# 14. SPDE mesh and spatial random effect
+# 13. SPDE mesh and spatial random effect
 
 ```{r spde}
 # Convert points to SPDE mesh for spatial autocorrelation
@@ -649,7 +617,7 @@ The formula `y ~ -1 + intercept + x1 + x2 + f(s, model = spde)` uses an explicit
 
 ---
 
-# 15. Prediction with INLA
+# 14. Prediction with INLA
 
 ```{r pred-INLA, cache = TRUE, cache.lazy = FALSE}
 
@@ -744,7 +712,7 @@ The flat prediction and SD vectors are inserted back into rasters using the same
 
 ---
 
-# 16. Non-informative priors (baseline comparison)
+# 15. Non-informative priors (baseline comparison)
 
 ## INLA model - non informed priors
 
