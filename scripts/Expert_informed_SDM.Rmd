@@ -2,7 +2,11 @@
 title: "Expert knowledge integration in species distribution model (SDM): A Bayesian approach"
 author: "Camila Diaz"
 date: "`r Sys.Date()`"
-output: html_document
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    self_contained: true
 ---
 
 ```{r setup, echo = FALSE, include = TRUE}
