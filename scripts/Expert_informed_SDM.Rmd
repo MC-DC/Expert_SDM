@@ -621,25 +621,25 @@ formula <- y ~ -1 + intercept + x1 + x2 + f(s, model = spde)
 
 The spatial random effect accounts for residual spatial autocorrelation in occurrence records, clustering that is not explained by the envionmental layers.
 
-**Mesh.** `inla.mesh.2d()` builds a constrained Delaunay triangulation over the study area. The inner maximum edge length is 1 % of the shorter bounding-box dimension (`edge1`); the outer buffer uses edges up to three times larger to avoid boundary effects. `min.angle = 21` prevents poorly shaped triangles that degrade numerical precision.
+**Mesh** `inla.mesh.2d()` builds a constrained Delaunay triangulation over the study area. The inner maximum edge length is 1 % of the shorter bounding-box dimension (`edge1`); the outer buffer uses edges up to three times larger to avoid boundary effects. `min.angle = 21` prevents poorly shaped triangles that degrade numerical precision.
 
-**SPDE/Matérn model.** The continuous spatial field $\xi(\mathbf{s})$ is modelled as a Gaussian process with a Matérn covariance:
+**SPDE/Matérn model** The continuous spatial field is modelled as a Gaussian process with a Matérn covariance:  
 
-$$\text{Cov}\!\left(\xi(\mathbf{s}),\, \xi(\mathbf{s}')\right) = \frac{\sigma^2}{2^{\nu-1}\,\Gamma(\nu)} \left(\frac{\|\mathbf{s}-\mathbf{s}'\|\sqrt{2\nu}}{\rho}\right)^\nu K_\nu\!\left(\frac{\|\mathbf{s}-\mathbf{s}'\|\sqrt{2\nu}}{\rho}\right)$$
+--- Insert equation here ----
+$$ Z(\mathbf{s}_n)...$$
 
-where $\rho$ is the **practical range** (distance at which correlation falls to approximately 0.1) and $\sigma$ is the **marginal standard deviation**. The SPDE approach of Lindgren et al. (2011) represents $\xi(\mathbf{s})$ as a Gaussian Markov Random Field on the mesh, making computation tractable via sparse matrix methods.
+--- I need to explain this:
+**Range**: distance at which correlation falls to approximately 0.1 and its marginal standard deviation.  
 
-**PC-Matérn priors.** Penalised complexity (PC) priors are placed on the range and SD:
+**Priors** Penalised complexity (PC) priors are placed on the range and SD:
 
-$$P(\rho < 10) = 0.05 \quad\Rightarrow\quad \text{penalises short ranges (spatial overfit)}$$
-$$P(\sigma > 1) = 0.05 \quad\Rightarrow\quad \text{penalises large random-effect variance}$$
 
-**Projector matrix.** `inla.spde.make.A()` computes the $N \times M$ sparse projector matrix $\mathbf{A}$ that bilinearly interpolates the mesh basis functions to the observation locations ($M$ = number of mesh nodes). The spatial field at observation $n$ is then $\xi(\mathbf{s}_n) = \sum_m A_{nm} u_m$.
 
-**Full model.** The INLA model for observation $n$ is:
+
+**Full model** The INLA model for observation $n$ is:
 
 $$y_n \sim \text{Bernoulli}(p_n)$$
-$$\text{logit}(p_n) = \alpha + \beta_k x_{kn} + \xi(\mathbf{s}_n)$$
+$$\text{logit}(p_n) = \alpha + \beta_k x_{kn} + Z(\mathbf{s}_n)$$
 
 The formula `y ~ -1 + intercept + x1 + x2 + f(s, model = spde)` uses an explicit intercept column (the `-1` suppresses the automatic intercept) so that the `control.fixed` prior can be applied to it by name.
 
