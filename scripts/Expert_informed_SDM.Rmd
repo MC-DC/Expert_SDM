@@ -239,7 +239,13 @@ stan_data_base <- list(
   c2_star  = (answrs_select$std_max_prec / 2),
   sigma_a2 = sigma_levels["low"],#make it so it takes the info from the table
   sigma_b2 = sigma_levels["low"],#make it so it takes the info from the table
-  sigma_c2 = sigma_levels["low"]#make it so it takes the info from the table
+  sigma_c2 = sigma_levels["low"],#make it so it takes the info from the table
+  
+  # Slope priors (both positive effects expected)
+  beta1_mu = 1, 
+  beta1_sigma = sigma_levels["medium"],
+  beta2_mu = 1, 
+  beta2_sigma = sigma_levels["medium"]
 )
 
 # Original model (baseline)
