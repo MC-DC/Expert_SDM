@@ -60,7 +60,7 @@ data/species/Danaus_plexippus-GBIF-30-03-26/
 *.dbf
 *.prj
 *.shx
-
+*.rds
 
 # Ignore temporary R files
 .Rhistory
