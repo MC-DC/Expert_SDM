@@ -26,11 +26,11 @@ knitr::opts_knit$set(
 
 # Overview
 
-This document implements a two-step Bayesian species distribution model (SDM) for monarch butterfly (*Danaus plexippus*) in Canada.
+This document implements a two step Bayesian species distribution model (SDM) for monarch butterfly (*Danaus plexippus*) in Canada.
 
-**Step 1: Expert-knowledge model (Stan).** Expert-elicited range limits and point observations are used to define an expert-informed prior and a small occurrence dataset. Two Stan variants are compared: a baseline logistic model and a weighted-likelihood model that down-weights low-confidence points. The posterior distributions of the regression coefficients are then extracted.
+**Step 1: Expert knowledge model (Stan).** Expert elicited range limits and point observations are used to define an expert informed prior and a small occurrence dataset. Two Stan variants are compared: a baseline logistic model and a weighted likelihood model that down weights low confidence points. The posterior distributions of the regression coefficients are then extracted.
 
-**Step 2: Model update with occurrence data (INLA).** The Stan posteriors are propagated as Gaussian priors into an R-INLA binomial model that includes a spatial random effect (SPDE/Matérn). The workflow is also run with non-informative priors to provide a baseline comparison.
+**Step 2: Model update with occurrence data (INLA).** The Stan posteriors are propagated as Gaussian priors into an R-INLA binomial model that includes a spatial random effect (SPDE/Matérn). The workflow is also run with non informative priors to provide a baseline comparison.
 
 ---
 
@@ -53,9 +53,11 @@ library(terra)
 
 ```{r load-data}
 
-epsg = 3857 
-epsg_crs = "EPSG:3857"
+epsg <- 3857 
+epsg_crs <- "EPSG:3857"
 
+map_crs <- 4326
+map_epsg <- "EPSG:4326"
 # Study area
 study_area0 <- st_read("C:/Users/maria/Documents/GitHub/Expert_SDM/data/study_area/canada.shp",
   quiet = TRUE)
@@ -89,11 +91,11 @@ Four data sources are loaded:
 |---|---|
 | `study_area` | Canada polygon, in EPSG:3857 |
 | `monarch_sf` | Presence/absence occurrence records, reprojected to EPSG:3857 |
-| `ek_pnt` | Expert-elicited point locations with label (`presence`/`avoid`) and confidence level |
-| `ek_answrs` | Expert-elicited range limits for temperature and precipitation (one row per survey response) |
+| `ek_pnt` | Expert elicited point locations with label (`presence`/`avoid`) and confidence level |
+| `ek_answrs` | Expert elicited range limits for temperature and precipitation (one row per survey response) |
 | `tas_mean0`, `pr_mean0` | Mean annual temperature and precipitation rasters (Ouranos climate data) |
 
-EPSG:3857 is used throughout so that all distance-based operations (mesh, simplification) are in metres.
+EPSG:3857 is used throughout so that all distance based operations (mesh, simplification) are in metres.
 
 ---
 
@@ -119,22 +121,22 @@ names(env) <- c("temp", "prec")
 
 env_df <- as.data.frame(env, xy = TRUE, na.rm = FALSE)
 
-# Track which cells are non-NA
+# Track which cells are non NA
 valid_idx <- complete.cases(env_df[, c("temp", "prec")])
 env_valid <- env_df[valid_idx, ]
 ```
 
-Each raster is reprojected to EPSG:3857 and clipped to the study area before standardizing. Standardization centers and scales each layer to zero mean and unit standard deviation across all non-NA cells within the study area:
+Each raster is reprojected to EPSG:3857 and clipped to the study area before standardizing. Standardization centers and scales each layer to zero mean and unit standard deviation across all non NA cells within the study area:
 
 $$z_i = \frac{x_i - \bar{x}}{s_x}$$
 
-where $\bar{x}$ and $s_x$ are the mean and standard deviation. This places both covariates on a common scale when they enter the model. The vectors `mt`, `st`, `mp`, `sp` are saved and reused in the `expert-knowledge` chunk to standardize the expert responses with the same transformation.
+where $\bar{x}$ and $s_x$ are the mean and standard deviation. This places both covariates on a common scale when they enter the model. The vectors `mt`, `st`, `mp`, `sp` are saved and reused in later to standardize the expert responses with the same transformation.
 
-`valid_idx` flags the raster cells with non-missing values for both covariates and is later used to fill prediction rasters from a flat prediction vector.
+`valid_idx` flags the raster cells with non missing values for both covariates and is later used to fill prediction rasters from a flat prediction vector.
 
 ---
 
-# 4. Expert knowledge processing
+# 4. Step1: Expert knowledge processing
 
 ```{r expert-knowledge}
 
@@ -161,9 +163,10 @@ sf_pnt <- sf_pnt |>
     w    = conf_weights[confidence]
   )
 
+sf_pnt_prj <- st_transform(sf_pnt, map_crs)
 m <- ggplot() +
-  geom_sf(data = study_area, fill = "grey83", color = "black") +
-  geom_sf(data = sf_pnt, aes(colour = type), alpha = 0.4, size = 2, shape = 16) +
+  geom_sf(data = study_area0, fill = "grey83", color = "black") +
+  geom_sf(data = sf_pnt_prj, aes(colour = type), alpha = 0.4, size = 2, shape = 16) +
   scale_colour_manual(
     name   = NULL,
     values = c("avoid"  = "red",
@@ -177,7 +180,6 @@ m <- ggplot() +
     panel.grid        = element_blank()
   )
 m
-#ggsave(paste0("C:/Users/maria/Documents/GitHub/Expert_SDM/results/data_surveys.png"), plot = m, width = 8, height = 8, dpi = 300)
 
 # standardize range values and Keep the necessary columns
 answrs_select <- ek_answrs |>
@@ -188,11 +190,15 @@ answrs_select <- ek_answrs |>
   select("survey_id", "std_min_temp", "std_max_temp", "confidence.temp", "std_min_prec", "std_max_prec", "confidence.prec")
 
 ```
+```{r Plot-data-save, include=FALSE}
+ggsave(paste0("C:/Users/maria/Documents/GitHub/Expert_SDM/results/data_surveys.png"), plot = m, width = 8, height = 8, dpi = 300)
+
+```
 
 
 **Expert points** (`sf_pnt`). The raw CSV coordinates are converted to an `sf` object, clipped to the study area, then reprojected. The binary response is defined as $y_n = 1$ if the label is `"presence"` and $y_n = 0$ otherwise. Standardized temperature and precipitation values are extracted at each point from the `env` stack.
 
-**Confidence = model quantities.** Each point carries a self-assessed confidence level (`Low`, `Medium`, `High`). This is mapped in the Weighted likelihood model:
+**Confidence = model quantities.** Each point carries a self assessed confidence level (`Low`, `Medium`, `High`). This is mapped in the Weighted likelihood model:
 
 | Confidence | `w` |
 |---|---|
@@ -200,7 +206,7 @@ answrs_select <- ek_answrs |>
 | Medium | 0.50 |
 | High | 1.00 |
 
-`w` feeds the weighted-likelihood model.
+`w` feeds the weighted likelihood model.
 
 **Expert range responses:** The elicited minimum and maximum values for temperature and precipitation are standardized with the same $\bar{x}$ and $s_x$ used for the rasters, so they are directly comparable to the standardized covariate values. These become the prior centres $a_k^*$, $b_k^*$, $c_k^*$ for the triangular response function.
 
@@ -216,7 +222,7 @@ library(rstan)
 
 rstan_options(auto_write = TRUE)
 
-sigma_levels <- c(low = 0.01, medium = 0.5, high = 1.0)
+sigma_levels <- c(Low = 0.01, Medium = 0.5, High = 1.0)
 
 # Base data shared by all Stan models
 stan_data_base <- list(
@@ -225,27 +231,27 @@ stan_data_base <- list(
   x1 = sf_pnt$temp,
   x2 = sf_pnt$prec,
 
-  # Covariate 1 expert values + uncertainty
-  a1_star  = answrs_select$std_min_temp,
-  b1_star  = answrs_select$std_max_temp,
-  c1_star  = (answrs_select$std_max_temp / 2),
-  sigma_a1 = sigma_levels["medium"], #make it so it takes the info from the table
-  sigma_b1 = sigma_levels["low"], #make it so it takes the info from the table
-  sigma_c1 = sigma_levels["medium"], #make it so it takes the info from the table
+   # Covariate 1 expert values + uncertainty
+  a1_star = answrs_select$std_min_temp,
+  b1_star = answrs_select$std_max_temp,  
+  c1_star = (answrs_select$std_max_temp/2),
+  sigma_a1 = sigma_levels[answrs_select$confidence.temp],
+  sigma_b1 = sigma_levels[answrs_select$confidence.temp],
+  sigma_c1 = sigma_levels[answrs_select$confidence.temp],
 
   # Covariate 2 expert values + uncertainty
-  a2_star  = answrs_select$std_min_prec,
-  b2_star  = answrs_select$std_max_prec,
-  c2_star  = (answrs_select$std_max_prec / 2),
-  sigma_a2 = sigma_levels["low"],#make it so it takes the info from the table
-  sigma_b2 = sigma_levels["low"],#make it so it takes the info from the table
-  sigma_c2 = sigma_levels["low"],#make it so it takes the info from the table
-  
+  a2_star = answrs_select$std_min_prec,  
+  b2_star = answrs_select$std_max_prec,  
+  c2_star = (answrs_select$std_max_prec/2),
+  sigma_a2 = sigma_levels[answrs_select$confidence.prec],
+  sigma_b2 = sigma_levels[answrs_select$confidence.prec],
+  sigma_c2 = sigma_levels[answrs_select$confidence.prec],
+
   # Slope priors (both positive effects expected)
   beta1_mu = 1, 
-  beta1_sigma = sigma_levels["medium"],
+  beta1_sigma = sigma_levels[answrs_select$confidence.temp],
   beta2_mu = 1, 
-  beta2_sigma = sigma_levels["medium"]
+  beta2_sigma = sigma_levels[answrs_select$confidence.prec]
 )
 
 # Original model (baseline)
@@ -259,8 +265,7 @@ stan_data_weighted <- c(
 ```
 
 
-```{r EK-model-stan, cache = TRUE, cache.lazy = FALSE, message=FALSE, warning=FALSE}
-# --- Baseline model (no confidence, original) ---
+```{r EK-model-stan, message=FALSE, warning=FALSE}
 stan_code <- stan_model(
   file = "Step1-Expert_model.stan",
   verbose = FALSE)
@@ -278,12 +283,12 @@ print(fit, pars = c("beta1", "beta2"))
 Two data lists are assembled, all sharing a common base. The base contains:
 
 - `N`, `y`, `x1`, `x2`: the expert point dataset.
-- Triangular shape priors for each covariate: the expert-elicited **lower limit** $a_k^*$, **upper limit** $b_k^*$, and implied **mode** $c_k^* = b_k^*/2$ (in standardized units), together with their uncertainty levels `sigma_*`.
+- Triangular shape priors for each covariate: the expert elicited **lower limit** $a_k^*$, **upper limit** $b_k^*$, and implied **mode** $c_k^* = b_k^*/2$ (in standardized units), together with their uncertainty levels `sigma_*`.
 - Slope direction priors (`beta1_mu = 1`, `beta2_mu = 1`) encoding the expectation that both temperature and precipitation have a positive association with occurrence probability.
 
-`sigma_levels` encodes three qualitative uncertainty tiers (`low = 0.01`, `medium = 0.5`, `high = 1.0`). A tighter sigma means the Stan sampler is constrained to stay near the expert-stated value; a wider sigma allows more learning from the data. As an example here we set the minimum temperature bound $b_1^*$ as `sigma_low` (tight) because implying experts are more certain about hard upper limits; the lower bound $a_1^*$ and mode $c_1^*$ are given `sigma_medium`.
+`sigma_levels` encodes three qualitative uncertainty tiers (`low = 0.01`, `medium = 0.5`, `high = 1.0`). A tighter sigma means the Stan sampler is constrained to stay near the expert stated value; a wider sigma allows more learning from the data. As an example here we set the minimum temperature bound $b_1^*$ as `sigma_low` (tight) because implying experts are more certain about hard upper limits; the lower bound $a_1^*$ and mode $c_1^*$ are given `sigma_medium`.
 
-The two option-specific lists append `w` weights (for the weighted-likelihood model) to the shared base.
+The two option specific lists append `w` weights (for the weighted likelihood model) to the shared base.
 
 ---
 
@@ -303,25 +308,18 @@ $$f_k(x;\, a_k, c_k, b_k) = \begin{cases} 0 & x < a_k \text{ or } x > b_k \\ \df
 
 The function equals 0 outside $[a_k, b_k]$ and reaches a maximum of 1 at $x = c_k$.
 
-## Ordered parameterisation
+Stan requires the constraint $a_k < c_k < b_k$ to be enforced explicitly.
 
-Stan requires the constraint $a_k < c_k < b_k$ to be enforced explicitly. This is done by sampling **log-gap** parameters and exponentiation:
-
-$$a_k = a_{k,\text{raw}}$$
-$$c_k = a_k + \exp(\text{log\_gap}_{c_k})$$
-$$b_k = c_k + \exp(\text{log\_gap}_{b_k})$$
-
-Because $\exp(\cdot) > 0$, the ordering $a_k < c_k < b_k$ is guaranteed for all sample values.
 
 ## Priors
 
-The shape parameters are given Gaussian priors centred on the expert-elicited values (in standardised units):
+The shape parameters are given Gaussian priors centred on the expert elicited values (in standardised units):
 
 $$a_{k,\text{raw}} \sim \mathcal{N}(a_k^*, \sigma_{a_k})$$
 $$\log(c_k - a_k) \sim \mathcal{N}\!\left(\log(c_k^* - a_k^*),\; \sigma_{c_k}\right)$$
 $$\log(b_k - c_k) \sim \mathcal{N}\!\left(\log(b_k^* - c_k^*),\; \sigma_{b_k}\right)$$
 
-The intercept and slope priors are set to non-informative
+The intercept and slope priors are set to non informative
 
 $$\alpha \sim \mathcal{N}(0, 1)$$
 $$\beta_k \sim \mathcal{N}(0, 1)$$
@@ -329,13 +327,13 @@ $$\beta_k \sim \mathcal{N}(0, 1)$$
 
 ---
 
-# 7. Weighted-Likelihood Model (Stan script)
+# 7. Weighted Likelihood Model (Stan script)
 
-Each point contributes to the log-posterior proportionally to its confidence weight (High=1, Medium=0.5, Low=0.25), treating low-confidence points as fractional observations.  
+Each point contributes to the log posterior proportionally to its confidence weight (High=1, Medium=0.5, Low=0.25), treating low confidence points as fractional observations.  
 
-Reference: Isaac et al. (2014), Botella et al. (2020)
 
-```{r EK-model-weighted, cache = TRUE, cache.lazy = FALSE}
+
+```{r EK-model-weighted}
 
 stan_code_weighted <- stan_model(file = "Step1-Expert_model_weighted.stan",
   verbose = FALSE)
@@ -351,11 +349,11 @@ fit_weighted <- sampling(
 print(fit_weighted, pars = c("beta1", "beta2"))
 ```
 
-Rather than modelling label error explicitly, the weighted-likelihood model scales each point's contribution to the log-posterior by a confidence weight $w_n$:
+Rather than modelling label error explicitly, the weighted likelihood model scales each point's contribution to the log posterior by a confidence weight $w_n$:
 
 $$\log p(\mathbf{y} \mid \boldsymbol{\theta}) = \sum_{n=1}^N w_n \log p(y_n \mid \boldsymbol{\theta})$$
 
-where $w_n \in \{0.25, 0.50, 1.00\}$ for Low, Medium, and High confidence respectively. A point with $w_n = 0.25$ contributes only one-quarter as much to the log-posterior as a high-confidence point, so it has proportionally less influence on the shape of the posterior. This is equivalent to treating it as a fractional observation.
+where $w_n \in \{0.25, 0.50, 1.00\}$ for Low, Medium, and High confidence respectively. A point with $w_n = 0.25$ contributes only one quarter as much to the log posterior as a high confidence point, so it has proportionally less influence on the shape of the posterior. This is equivalent to treating it as a fractional observation.
 
 ---
 
@@ -408,9 +406,9 @@ sd_weighted <- predict_sd(fit_weighted, env_valid$temp, env_valid$prec)
 ```
 
 
-**`tri(x, a, b, c)`** — the triangular response function evaluated in R for prediction (mirrors the Stan `transformed parameters` block). It is vectorised over `x` and accepts matrices for `a`, `b`, `c` so it can operate on the full posterior draw matrix at once.
+**`tri(x, a, b, c)`**: the triangular response function evaluated in R for prediction (mirrors the Stan `transformed parameters` block). It is vectorised over `x` and accepts matrices for `a`, `b`, `c` so it can operate on the full posterior draw matrix at once.
 
-**`predict_occurrence(fit, new_x1, new_x2)`** — computes the posterior mean occurrence probability at each prediction location. For each location $i$ and each posterior draw $s = 1,\ldots,S$:
+**`predict_occurrence(fit, new_x1, new_x2)`**: computes the posterior mean occurrence probability at each prediction location. For each location $i$ and each posterior draw $s = 1,\ldots,S$:
 
 $$\hat{p}_i^{(s)} = \text{logistic}\!\left(\alpha^{(s)} + \beta_1^{(s)} f_1(x_{1i};\, a_1^{(s)}, c_1^{(s)}, b_1^{(s)}) + \beta_2^{(s)} f_2(x_{2i};\, a_2^{(s)}, c_2^{(s)}, b_2^{(s)})\right)$$
 
@@ -418,7 +416,7 @@ The posterior mean is then:
 
 $$\bar{p}_i = \frac{1}{S} \sum_{s=1}^S \hat{p}_i^{(s)}$$
 
-**`predict_sd(fit, new_x1, new_x2)`** — computes the posterior standard deviation of the occurrence probability, which serves as a spatially explicit measure of uncertainty:
+**`predict_sd(fit, new_x1, new_x2)`**: computes the posterior standard deviation of the occurrence probability, which serves as a spatially explicit measure of uncertainty:
 
 $$\text{SD}_i = \sqrt{\frac{1}{S-1} \sum_{s=1}^S \left(\hat{p}_i^{(s)} - \bar{p}_i\right)^2}$$
 
@@ -432,18 +430,21 @@ $$\text{SD}_i = \sqrt{\frac{1}{S-1} \sum_{s=1}^S \left(\hat{p}_i^{(s)} - \bar{p}
 pred_cropped_baseline <- make_pred_raster(preds_baseline, env[[1]], valid_idx)
 pred_cropped_weighted <- make_pred_raster(preds_weighted, env[[1]], valid_idx)
 
-plot(pred_cropped_baseline,
-     main  = "Baseline (no confidence weighting)",
+pred_prj_baseline <- project(pred_cropped_baseline, map_epsg)
+pred_prj_weighted <- project(pred_cropped_weighted, map_epsg)
+
+plot(pred_prj_baseline,
+     main  = "Baseline: Expert likelihood",
      col   = hcl.colors(100, "YlGnBu"), range = c(0, 1),
      axes  = FALSE, box = FALSE)
 
-plot(pred_cropped_weighted,
-     main  = "Option 2: Weighted likelihood model",
+plot(pred_prj_weighted,
+     main  = "Weighted: likelihood model",
      col   = hcl.colors(100, "YlGnBu"), range = c(0, 1),
      axes  = FALSE, box = FALSE)
 ```
 
-Two side-by-side occurrence probability maps are produced for the Step 1 expert-only models. Each pixel shows the posterior mean probability $\bar{p}_i \in [0, 1]$ computed over all valid raster cells from the `env` stack. Comparing the three maps reveals how the confidence-handling strategy affects the spatial distribution of predicted suitability: differences are most visible in regions where low-confidence expert points are located.
+Two side by side occurrence probability maps are produced for the Step 1 expert only models. Each pixel shows the posterior mean probability $\bar{p}_i \in [0, 1]$ computed over all valid raster cells from the `env` stack. Comparing the three maps reveals how the confidence handling strategy affects the spatial distribution of predicted suitability: differences are most visible in regions where low confidence expert points are located.
 
 ---
 
@@ -455,23 +456,74 @@ Two side-by-side occurrence probability maps are produced for the Step 1 expert-
 sd_cropped_baseline <- make_pred_raster(sd_baseline, env[[1]], valid_idx)
 sd_cropped_weighted <- make_pred_raster(sd_weighted, env[[1]], valid_idx)
 
-plot(sd_cropped_baseline,
-     main = "Baseline — Uncertainty (posterior SD)",
+sd_prj_baseline <- project(sd_cropped_baseline, map_epsg)
+sd_prj_weighted <- project(sd_cropped_weighted, map_epsg)
+
+plot(sd_prj_baseline,
+     main = "Baseline: Uncertainty (posterior SD)",
      col  = hcl.colors(100, "Reds"), range = c(0, 0.2),axes = FALSE, box = FALSE)
 
 
-plot(sd_cropped_weighted,
-     main = "Option 2: Weighted — Uncertainty (posterior SD)",
+plot(sd_prj_weighted,
+     main = "Weighted: Uncertainty (posterior SD)",
      col  = hcl.colors(100, "Reds"), range = c(0, 0.2),axes = FALSE, box = FALSE)
 ```
 
-The posterior SD maps visualise parameter uncertainty propagated through to the occurrence probability scale. High SD at a pixel indicates that the posterior draws produce a wide spread of $\hat{p}_i^{(s)}$ values — either because the covariates at that location are near the edges of the expert-elicited range, or because the regression coefficients themselves are poorly determined. The color scale is fixed at $[0, 0.2]$ across all three variants to allow direct visual comparison.
+```{r Plot-STAN-save, include=FALSE}
+writeRaster(pred_cropped_baseline, "C:/Users/maria/Documents/GitHub/Expert_SDM/results/Models/STAN_SDM_PA.tif", overwrite=TRUE)
+writeRaster(pred_cropped_weighted, "C:/Users/maria/Documents/GitHub/Expert_SDM/results/Models/STAN_sd_PA.tif", overwrite=TRUE)
+
+writeRaster(sd_cropped_baseline, "C:/Users/maria/Documents/GitHub/Expert_SDM/results/Models/STAN_SDM-W_PA.tif", overwrite=TRUE)
+writeRaster(sd_cropped_weighted, "C:/Users/maria/Documents/GitHub/Expert_SDM/results/Models/STAN_sd-W_PA.tif", overwrite=TRUE)
+
+png(file="C:/Users/maria/Documents/GitHub/Expert_SDM/results/Maps/STAN_SDM_PA.png",
+    width=600, height=350)
+plot(pred_prj_baseline,
+     main = "Baseline: Expert likelihood",
+     col  = hcl.colors(100, "YlGnBu"),
+     range = c(0, 1),
+     axes   = FALSE,
+     box    = FALSE)
+dev.off()
+
+png(file="C:/Users/maria/Documents/GitHub/Expert_SDM/results/Maps/STAN_sd_PA.png",
+    width=600, height=350)
+plot(pred_prj_weighted,
+     main = "Weighted: likelihood model",
+     col  = hcl.colors(100, "Reds"),
+     axes   = FALSE,
+     box    = FALSE)
+dev.off()
+
+
+png(file="C:/Users/maria/Documents/GitHub/Expert_SDM/results/Maps/STAN_SDM-W_PA.png",
+    width=600, height=350)
+plot(sd_prj_baseline,
+     main = "Baseline: Uncertainty (posterior SD)",
+     col  = hcl.colors(100, "YlGnBu"),
+     range = c(0, 1),
+     axes   = FALSE,
+     box    = FALSE)
+dev.off()
+
+png(file="C:/Users/maria/Documents/GitHub/Expert_SDM/results/Maps/STAN_sd-W_PA.png",
+    width=600, height=350)
+plot(sd_prj_weighted,
+     main = "Weighted: Uncertainty (posterior SD)",
+     col  = hcl.colors(100, "Reds"),
+     axes   = FALSE,
+     box    = FALSE)
+dev.off()
+
+
+```
+
+The posterior SD maps visualise parameter uncertainty propagated through to the occurrence probability scale. High SD at a pixel indicates that the posterior draws produce a wide spread of $\hat{p}_i^{(s)}$ values — either because the covariates at that location are near the edges of the expert elicited range, or because the regression coefficients themselves are poorly determined. The color scale is fixed at $[0, 0.2]$ across all three variants to allow direct visual comparison.
 
 ---
 
 # 11. Step 2: Extracting Stan posteriors as INLA priors
 
-## INLA model: expert informed priors
 
 ```{r stan-summary}
 # Extract mean and SD from Stan posterior to use as INLA priors.
@@ -491,7 +543,7 @@ prior_beta2_mean  <- stan_fixed["beta2",  "mean"]
 prior_beta2_sd    <- stan_fixed["beta2",  "sd"]
 ```
 
-This chunk implements the **Bayesian updating** step. The marginal posterior from the expert-only Stan model is summarized to a Gaussian approximation, mean and SD for each of the three fixed effects ($\alpha$, $\beta_1$, $\beta_2$), and then used as the prior distribution for the corresponding parameter in the INLA model.
+This chunk implements the **Bayesian updating** step. The marginal posterior from the expert only Stan model is summarized to a Gaussian approximation, mean and SD for each of the three fixed effects ($\alpha$, $\beta_1$, $\beta_2$), and then used as the prior distribution for the corresponding parameter in the INLA model.
 
 
 ---
@@ -503,7 +555,7 @@ prec_alpha <- 1 / prior_alpha_sd^2
 prec_beta1 <- 1 / prior_beta1_sd^2
 prec_beta2 <- 1 / prior_beta2_sd^2
 
-# Build INLA-format priors from Stan posteriors
+# Build a INLA format priors from Stan posteriors
 prior_alpha <- list(prior = "gaussian",
                     param = c(prior_alpha_mean, prec_alpha))
 
@@ -537,7 +589,7 @@ head(monarch_occ, 5)
 
 ```
 
-The monarch occurrence dataset (`monarch_sf`) is supplement with standardized covariate values extracted at each occurrence point from the `env` stack. The response variable `y` is taken from the `presenc` field. This creates the dataset used in Step 2 to update the expert-informed priors with occurrence records from biodiversity databases.
+The monarch occurrence dataset (`monarch_sf`) is supplement with standardized covariate values extracted at each occurrence point from the `env` stack. The response variable `y` is taken from the `presenc` field. This creates the dataset used in Step 2 to update the expert informed priors with occurrence records from biodiversity databases.
 
 ---
 
@@ -552,7 +604,7 @@ inla_df <- data.frame(
 
 ```
 
-A plain data frame with columns `y`, `x1`, `x2` is created for use inside the INLA stack, which requires non-spatial tabular objects.
+A plain data frame with columns `y`, `x1`, `x2` is created for use inside the INLA stack, which requires non spatial tabular objects.
 
 ---
 
@@ -599,7 +651,7 @@ formula <- y ~ -1 + intercept + x1 + x2 + f(s, model = spde)
 
 The spatial random effect accounts for residual spatial autocorrelation in occurrence records, clustering that is not explained by the envionmental layers.
 
-**Mesh** `inla.mesh.2d()` builds a constrained Delaunay triangulation over the study area. The inner maximum edge length is 1 % of the shorter bounding-box dimension (`edge1`); the outer buffer uses edges up to three times larger to avoid boundary effects. `min.angle = 21` prevents poorly shaped triangles that degrade numerical precision.
+**Mesh** `inla.mesh.2d()` builds a constrained Delaunay triangulation over the study area. The inner maximum edge length is 1 % of the shorter bounding box dimension (`edge1`); the outer buffer uses edges up to three times larger to avoid boundary effects. `min.angle = 21` prevents poorly shaped triangles that degrade numerical precision.
 
 **SPDE/Matérn model** The continuous spatial field is modelled as a Gaussian process with a Matérn covariance:  
 
@@ -680,7 +732,7 @@ pred_sd    <- fit_inla_full$summary.fitted.values[idx_pred, "sd"]
 
 To generate a prediction map without refitting, a second INLA stack (`stack_pred`) is created over all valid raster cells. Setting `y = NA` for the prediction rows tells INLA to compute the posterior predictive distribution at those locations but not use them in the likelihood. The estimation and prediction stacks are then joined into `stack_full` and a single `inla()` call fits the model and simultaneously computes predictions.
 
-`control.fixed` passes the Stan-derived Gaussian priors to INLA as `(mean, precision)` pairs for each fixed effect. With `link = 1` and `compute = TRUE`, `summary.fitted.values` returns the posterior mean and SD of $p_n$ (on the probability scale, after applying the logit link inverse) for each row in the full stack. The prediction rows are extracted by their tag index.
+`control.fixed` passes the Stan derived Gaussian priors to INLA as `(mean, precision)` pairs for each fixed effect. With `link = 1` and `compute = TRUE`, `summary.fitted.values` returns the posterior mean and SD of $p_n$ (on the probability scale, after applying the logit link inverse) for each row in the full stack. The prediction rows are extracted by their tag index.
 
 `control.compute` requests DIC and WAIC for model comparison and `config = TRUE` for access to the internal GMRF configuration (needed for posterior sampling if required later).
 
@@ -697,8 +749,10 @@ sd_raster[valid_idx] <- pred_sd
 
 non_na_extent <- ext(trim(pred_raster))
 pred_cropped <- crop(pred_raster, non_na_extent)
-plot(pred_cropped,
-     main = "Model update - Species Distribution Model",
+pred_prj <- project(pred_cropped, map_epsg)
+
+plot(pred_prj,
+     main = "Species Distribution Model (Model update)",
      col  = hcl.colors(100, "YlGnBu"),
      range = c(0, 1),
      axes   = FALSE,
@@ -707,20 +761,50 @@ plot(pred_cropped,
 
 non_na_extent <- ext(trim(sd_raster))
 sd_cropped <- crop(sd_raster, non_na_extent)
-plot(sd_cropped,
-     main = "Model update - Uncertainty (posterior SD)",
+sd_prj <- project(sd_cropped, map_epsg)
+
+plot(sd_prj,
+     main = "Uncertainty (Model update)",
      col  = hcl.colors(100, "Reds"),
      axes   = FALSE,
      box    = FALSE)
 ```
 
-The flat prediction and SD vectors are inserted back into rasters using the same `valid_idx` mask and then cropped to the non-NA extent. These maps represent the **updated** species distribution model: the expert knowledge from Step 1 has been used as informative priors, and the model has been updated with the larger monarch occurrence dataset. The uncertainty map integrates both fixed-effect parameter uncertainty and spatial random-effect uncertainty.
+```{r Plot-INLA-save, include=FALSE}
+saveRDS(fit_inla_full, "C:/Users/maria/Documents/GitHub/Expert_SDM/results/Models/EK_INLA_PA.rds")
+
+writeRaster(pred_cropped, "C:/Users/maria/Documents/GitHub/Expert_SDM/results/Models/EK_SDM_PA.tif", overwrite=TRUE)
+writeRaster(sd_cropped, "C:/Users/maria/Documents/GitHub/Expert_SDM/results/Models/EK_sd_PA.tif", overwrite=TRUE)
+
+png(file="C:/Users/maria/Documents/GitHub/Expert_SDM/results/Maps/EK_SDM_PA.png",
+    width=600, height=350)
+plot(pred_prj,
+     main = "Species Distribution Model (Model update)",
+     col  = hcl.colors(100, "YlGnBu"),
+     range = c(0, 1),
+     axes   = FALSE,
+     box    = FALSE)
+dev.off()
+
+png(file="C:/Users/maria/Documents/GitHub/Expert_SDM/results/Maps/EK_sd_PA.png",
+    width=600, height=350)
+plot(sd_prj,
+     main = "Uncertainty (Model update)",
+     col  = hcl.colors(100, "Reds"),
+     axes   = FALSE,
+     box    = FALSE)
+dev.off()
+
+
+```
+
+The flat prediction and SD vectors are inserted back into rasters using the same `valid_idx` mask and then cropped to the non NA extent. These maps represent the **updated** species distribution model: the expert knowledge from Step 1 has been used as informative priors, and the model has been updated with the larger monarch occurrence dataset. The uncertainty map integrates both fixed-effect parameter uncertainty and spatial random effect uncertainty.
 
 ---
 
-# 15. Non-informative priors (baseline comparison)
+# 15. Non informative priors (baseline comparison)
 
-## INLA model - non informed priors
+## INLA model: non informed priors
 
 ```{r prior-NonInfo}
 
@@ -729,7 +813,7 @@ prior.beta <- list(prec = list(default = 1/(1)^2, Intercept = 1/(20)^2),
 
 ```
 
-A weakly informative prior structure is defined for comparison: all fixed effects are centred at 0, with the intercept having a very wide prior ($\sigma = 20$, $\tau = 0.0025$) and the slope coefficients having a moderately wide prior ($\sigma = 1$, $\tau = 1$). This represents a near-ignorance prior with no expert knowledge incorporated and provides a baseline against which to assess the contribution of the Step 1 expert elicitation.
+A weakly informative prior structure is defined for comparison: all fixed effects are centred at 0, with the intercept having a very wide prior ($\sigma = 20$, $\tau = 0.0025$) and the slope coefficients having a moderately wide prior ($\sigma = 1$, $\tau = 1$). This represents a prior with no expert knowledge incorporated and provides a baseline against which to assess the contribution of the Step 1 expert elicitation.
 
 ---
 
@@ -757,11 +841,11 @@ pred_sd    <- fit_inla_full$summary.fitted.values[idx_pred, "sd"]
 
 ```
 
-The same formula and full stack are used as in the expert-informed model, but `control.fixed` is replaced with the non-informative `prior.beta` list. All other settings are identical so that differences in the output maps can be attributed solely to the choice of prior. Comparing DIC/WAIC between this fit and the expert-informed fit quantifies the predictive benefit of incorporating expert knowledge.
+The same formula and full stack are used as in the expert informed model, but `control.fixed` is replaced with the non informative `prior.beta` list. All other settings are identical so that differences in the output maps can be attributed solely to the choice of prior. 
 
 ---
 
-```{r Plot--NonInfo}
+```{r Plot-NonInfo}
 pred_raster <- rast(env$temp)
 values(pred_raster) <- NA
 pred_raster[valid_idx] <- pred_mean
@@ -772,8 +856,10 @@ sd_raster[valid_idx] <- pred_sd
 
 non_na_extent <- ext(trim(pred_raster))
 pred_cropped <- crop(pred_raster, non_na_extent)
-plot(pred_cropped,
-     main = "Non informative - Species Distribution Model",
+pred_prj <- project(pred_cropped, map_epsg)
+
+plot(pred_prj,
+     main = "Species Distribution Model (Non informative)",
      col  = hcl.colors(100, "YlGnBu"),
      range = c(0, 1),
      axes   = FALSE,
@@ -782,10 +868,39 @@ plot(pred_cropped,
 
 non_na_extent <- ext(trim(sd_raster))
 sd_cropped <- crop(sd_raster, non_na_extent)
-plot(sd_cropped,
-     main = "Non informative - Uncertainty (posterior SD)",
+sd_prj <- project(sd_cropped, map_epsg)
+
+plot(sd_prj,
+     main = "Uncertainty (Non informative)",
      col  = hcl.colors(100, "Reds"),
      axes   = FALSE,
      box    = FALSE)
 ```
 
+```{r Plot-NonInfo-save, include=FALSE}
+saveRDS(fit_inla_full, "C:/Users/maria/Documents/GitHub/Expert_SDM/results/Models/NI_INLA_PA.rds")
+
+writeRaster(pred_cropped, "C:/Users/maria/Documents/GitHub/Expert_SDM/results/Models/NI_SDM_PA.tif", overwrite=TRUE)
+writeRaster(sd_cropped, "C:/Users/maria/Documents/GitHub/Expert_SDM/results/Models/NI_sd_PA.tif", overwrite=TRUE)
+
+png(file="C:/Users/maria/Documents/GitHub/Expert_SDM/results/Maps/NI_SDM_PA.png",
+    width=600, height=350)
+plot(pred_prj,
+     main = "Species Distribution Model (Non informative)",
+     col  = hcl.colors(100, "YlGnBu"),
+     range = c(0, 1),
+     axes   = FALSE,
+     box    = FALSE)
+dev.off()
+
+png(file="C:/Users/maria/Documents/GitHub/Expert_SDM/results/Maps/NI_sd_PA.png",
+    width=600, height=350)
+plot(sd_prj,
+     main = "Uncertainty (Non informative)",
+     col  = hcl.colors(100, "Reds"),
+     axes   = FALSE,
+     box    = FALSE)
+dev.off()
+
+
+```
