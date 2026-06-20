@@ -1,9 +1,40 @@
+---
+title: "Expert informed SDM: data thinning simulation"
+author: "Camila Diaz"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    self_contained: true
+---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  collapse = TRUE,
+  comment = "#>",
+  tidy = TRUE,
+  tidy.opts = list(width.cutoff = 70)
+)
+knitr::opts_knit$set(
+  global.par = TRUE
+)
 ```
 
+# Overview
 
+This document reuses the two step Bayesian species distribution model (SDM) for monarch butterfly (*Danaus plexippus*) in Canada explained in the **Expert_informed_SDM.Rmd** and turns it into a data thinning simulation experiment.
+
+**Step 1: Expert knowledge model (Stan).** Expert elicited range limits and point observations define an expert informed prior and a small occurrence dataset. A logistic model with a triangular suitability response is fit in Stan, and the posterior distributions of the regression coefficients ($\alpha$, $\beta_1$, $\beta_2$) are extracted.
+
+**Step 2: Model update with occurrence data (INLA).** The Stan posteriors are propagated as Gaussian priors into an R-INLA binomial model with a spatial random effect (SPDE/Matérn). The novelty here is that Step 2 is repeated on progressively thinned occurrence datasets, 70 %, 90 %, 99 %, and 99.9 % of the records removed, under two prior regimes (expert informed vs. non informative). To keep the comparison from depending on any single thinning draw, each scenario is repeated 100 times on independent random subsamples and the prediction and uncertainty maps are averaged across replicates. Comparing the resulting maps quantifies how much expert knowledge stabilizes the model as occurrence data become scarce.
+
+---
+
+# 1. Setup
 
 ```{r libraries, echo = TRUE}
 library(dplyr)
@@ -15,38 +46,58 @@ library(geodata)
 library(terra)
 ```
 
+---
+
+# 2. Data loading
 
 ```{r load-data}
 
-epsg = 3857 #4326
-epsg_crs = "EPSG:3857"#Studt area - Quebec
+epsg = 3857
+epsg_crs = "EPSG:3857"
+
+map_crs <- 4326
+map_epsg <- "EPSG:4326"
 
 # Study area
-study_area0 <- st_read("C:/Users/maria/Documents/Chapter1/bayesian_model/data/study_area/canada.shp")
-#study_area0 <- st_read("C:/Users/maria/Documents/Chapter1/bayesian_model/data/study_area/quebec.shp")
+study_area0 <- st_read("C:/Users/maria/Documents/GitHub/Expert_SDM/data/study_area/canada.shp",
+  quiet = TRUE)
 study_area <- study_area0 |>
   st_transform(epsg) |>
   st_union()|>
-  st_simplify(dTolerance = 1000)|> # 1 km tolerance in EPSG:3857
+  st_simplify(dTolerance = 1000)|> # 1 km tolerance
   st_make_valid()
 
 # Occurrence data
-monarch_data <- st_read("C:/Users/maria/Documents/Chapter1/bayesian_model/data/species/PA_monarch_CAN.shp") #en epsg 3857
-## For sampling
-
-monarch_sf <- monarch_data |>
+monarch_data <- st_read("C:/Users/maria/Documents/GitHub/Expert_SDM/data/species/PA_monarch_CAN.shp",
+  quiet = TRUE)
+monarch_sf0 <- monarch_data |>
   st_transform(crs = epsg)
 
 # Expert knowledge data
-ek_pnt <- read.csv("C:/Users/maria/Documents/Chapter1/bayesian_model/data/expert_knowledge/Points.csv")
-ek_answrs <- read.csv("C:/Users/maria/Documents/Chapter1/bayesian_model/data/expert_knowledge/Responses.csv")
+ek_pnt <- read.csv("C:/Users/maria/Documents/GitHub/Expert_SDM/data/expert_knowledge/Points.csv")
+ek_answrs <- read.csv("C:/Users/maria/Documents/GitHub/Expert_SDM/data/expert_knowledge/Responses.csv")
 
 # Environmental layers - Ouranos
-tas_mean0 <- rast("C:/Users/maria/Documents/Chapter1/bayesian_model/data/predictors/tas_mean.tif")
-pr_mean0 <- rast("C:/Users/maria/Documents/Chapter1/bayesian_model/data/predictors/pr_mean.tif")
+tas_mean0 <- rast("C:/Users/maria/Documents/GitHub/Expert_SDM/data/predictors/tas_mean.tif")
+pr_mean0 <- rast("C:/Users/maria/Documents/GitHub/Expert_SDM/data/predictors/pr_mean.tif")
 
 ```
 
+Four data sources are loaded and a common projection is fixed:
+
+| Object | Contents |
+|---|---|
+| `study_area` | Canada polygon, dissolved (`st_union`), simplified to 1 km tolerance, and made valid, in EPSG:3857 |
+| `monarch_sf` | Full presence/absence occurrence records, reprojected to EPSG:3857 |
+| `ek_pnt` | Expert elicited point locations with label (`presence`/`avoid`) and confidence |
+| `ek_answrs` | Expert elicited range limits for temperature and precipitation (one row per survey response) |
+| `tas_mean0`, `pr_mean0` | Mean annual temperature and precipitation rasters (Ouranos climate data) |
+
+EPSG:3857 is used throughout so that all distance based operations (mesh, simplification) are in metres.
+
+---
+
+# 3. Environmental layer preparation
 
 ```{r prepare-env-layers}
 tas_mean <- project(tas_mean0, epsg_crs)
@@ -70,11 +121,18 @@ env
 
 env_df <- as.data.frame(env, xy = TRUE, na.rm = FALSE)
 
-# Track which cells are non-NA
+# Track which cells are non NA
 valid_idx <- complete.cases(env_df[, c("temp", "prec")])
 env_valid <- env_df[valid_idx, ]
 ```
 
+Each raster is reprojected to EPSG:3857, clipped to the study area, then standardised to zero mean and unit standard deviation across the non NA cells.
+
+This puts temperature and precipitation on a common scale before they enter the model. The means and SDs (`mt`, `st`, `mp`, `sp`) are stored and reused in the next chunk to standardise the expert responses with the *same* transformation, so expert range limits and raster values are directly comparable.
+
+---
+
+# 4. Expert knowledge processing
 
 ```{r expert-knowledge}
 
@@ -83,7 +141,7 @@ sf_pnt <- ek_pnt |>
   st_as_sf(coords = c("long", "lat"),
            crs = 4326) |>
   st_intersection(study_area0) |>
-  st_transform(crs = epsg) 
+  st_transform(crs = epsg)
 head(sf_pnt, 5)
 
 sf_pnt <- sf_pnt |>
@@ -100,16 +158,26 @@ answrs_select <- ek_answrs |>
 
 ```
 
+**Expert points** (`sf_pnt`). The raw CSV coordinates are converted to an `sf` object (WGS84), clipped to the study area, and reprojected to EPSG:3857. The binary response is defined as $y_n = 1$ when the label is `"presence"` and $0$ otherwise, and standardised temperature and precipitation are extracted at each point from the `env` stack.
+
+**Expert range responses** (`answrs_select`). The elicited minimum and maximum temperature and precipitation are standardized with the same $\bar{x}$ and $s_x$ used for the rasters, then the per covariate columns plus confidence are kept. These standardized limits become the prior centres $a_k^*$, $b_k^*$, $c_k^*$ of the triangular response in Step 1.
+
+---
+
+# 5. Stan data preparation
+
 Using Stan to run step 1, expert informed model
 
 ```{r EK-stan-data}
 #library(cmdstanr)
 library(posterior)
-library(loo)
 library(rstan)
 
-sigma_levels <- c(low = 0.01, medium = 0.5, high = 1.0)
+sigma_levels <- c(Low = 0.01, Medium = 0.5, High = 1.0)
 sigma_levels
+
+sigma_temp <- answrs_select$confidence.temp
+sigma_prec <- answrs_select$confidence.prec
 
 stan_data <- list(
   N  = length(sf_pnt$y),
@@ -119,68 +187,81 @@ stan_data <- list(
 
   # Covariate 1 expert values + uncertainty
   a1_star = answrs_select$std_min_temp,
-  b1_star = answrs_select$std_max_temp,  
+  b1_star = answrs_select$std_max_temp,
   c1_star = (answrs_select$std_max_temp/2),
-  sigma_a1 = sigma_levels["medium"],
-  sigma_b1 = sigma_levels["low"],
-  sigma_c1 = sigma_levels["medium"],
+  sigma_a1 = sigma_levels[sigma_temp],
+  sigma_b1 = sigma_levels[sigma_temp],
+  sigma_c1 = sigma_levels[sigma_temp],
 
   # Covariate 2 expert values + uncertainty
-  a2_star = answrs_select$std_min_prec,  
-  b2_star = answrs_select$std_max_prec,  
+  a2_star = answrs_select$std_min_prec,
+  b2_star = answrs_select$std_max_prec,
   c2_star = (answrs_select$std_max_prec/2),
-  sigma_a2 = sigma_levels["low"],
-  sigma_b2 = sigma_levels["low"],
-  sigma_c2 = sigma_levels["low"],
+  sigma_a2 = sigma_levels[sigma_prec],
+  sigma_b2 = sigma_levels[sigma_prec],
+  sigma_c2 = sigma_levels[sigma_prec],
 
   # Slope priors (both positive effects expected)
-  beta1_mu = 1, 
-  beta1_sigma = sigma_levels["medium"],
-  beta2_mu = 1, 
-  beta2_sigma = sigma_levels["medium"]
+  beta1_mu = 1,
+  beta1_sigma = sigma_levels[sigma_temp],
+  beta2_mu = 1,
+  beta2_sigma = sigma_levels[answrs_select$confidence.prec]
 )
 
 
 ```
 
+The Stan input list bundles the expert dataset and the prior hyper-parameters:
 
+- `N`, `y`, `x1`, `x2`: the expert points and their standardized covariates.
+- Triangular shape priors per covariate: the expert lower limit $a_k^*$, upper limit $b_k^*$, and implied mode $c_k^* = b_k^*/2$ (standardized units), each with an uncertainty `sigma_*`.
+- Slope direction priors (`beta1_mu = 1`, `beta2_mu = 1`) encoding the expectation that warmer/wetter conditions raise occurrence probability.
+
+`sigma_levels` defines three qualitative uncertainty tiers (`low = 0.01`, `medium = 0.5`, `high = 1.0`). A tighter sigma keeps the sampler near the expert stated value; a wider sigma lets the data move it.
+
+---
+
+# 6. Step 1: Expert knowledge model (Stan)
 
 ```{r EK-model-stan}
 
 stan_code <- stan_model(file = "Step1-Expert_model.stan")
 
 
-fit <- sampling(
-  stan_code,
-  data = stan_data,
-  chains = 4, 
-  refresh = 10000
-)
+fit <- sampling(stan_code,
+                data = stan_data,
+                chains = 4,
+                refresh = 0,
+                show_messages = FALSE,
+                open_progress = FALSE)
 
+print(fit, pars = c("beta1", "beta2"))
 ```
 
 
+## Step 1: prediction function
+
 ```{r EK-predict-function}
 predict_occurrence <- function(fit, new_x1, new_x2) {
-  
+
   draws <- as.matrix(fit, pars = c("alpha", "beta1", "beta2",
                                     "a1", "c1", "b1",
                                     "a2", "c2", "b2"))
-  
+
   tri <- function(x, a, b, c) {
     ifelse(x < a | x > b, 0,
       ifelse(x <= c,
         2 * (x - a) / ((b - a) * (c - a)),
         2 * (b - x) / ((b - a) * (b - c))))
   }
-  
+
   preds <- sapply(seq_along(new_x1), function(i) {
     f1 <- tri(new_x1[i], draws[, "a1"], draws[, "b1"], draws[, "c1"])
     f2 <- tri(new_x2[i], draws[, "a2"], draws[, "b2"], draws[, "c2"])
     mu <- draws[, "alpha"] + draws[, "beta1"] * f1 + draws[, "beta2"] * f2
     mean(plogis(mu))
   })
-  
+
   preds
 }
 
@@ -190,9 +271,11 @@ preds <- predict_occurrence(fit,
 ```
 
 
+## Step 1: Predicted occurrence map
+
 ```{r EK-model}
 # Create an empty raster with same extent/resolution
-pred_raster1 <- rast(env[[1]])  
+pred_raster1 <- rast(env[[1]])
 values(pred_raster1) <- NA
 
 # Fill in predictions at valid cells
@@ -203,6 +286,8 @@ pred_cropped1 <- crop(pred_raster1, non_na_extent1)
 
 ```
 
+
+## Step 1: Posterior uncertainty map
 
 ```{r EK-sd}
 predict_sd <- function(fit, new_x1, new_x2) {
@@ -215,7 +300,7 @@ predict_sd <- function(fit, new_x1, new_x2) {
         2 * (x - a) / ((b - a) * (c - a)),
         2 * (b - x) / ((b - a) * (b - c))))
   }
-  
+
   sds <- sapply(seq_along(new_x1), function(i) {
     f1 <- tri(new_x1[i], draws[, "a1"], draws[, "b1"], draws[, "c1"])
     f2 <- tri(new_x2[i], draws[, "a2"], draws[, "b2"], draws[, "c2"])
@@ -234,9 +319,13 @@ sd_cropped1 <- crop(sd_raster1, non_na_extent1)
 
 ```
 
+`predict_sd()` is identical to `predict_occurrence()` except it returns the posterior **standard deviation** of $\hat{p}_i^{(s)}$ across draws instead of the mean, a spatially explicit measure of Step 1 parameter uncertainty. High SD marks cells where covariates sit near the edges of the elicited range or where the coefficients are poorly determined. The result is rasterised and cropped into `sd_cropped1`.
 
+---
 
-```{r 70stan-summary}
+# 7. Step 2: priors from the Step 1 posterior
+
+```{r stan-summary}
 # Extract mean and SD from Stan posterior to use as INLA priors
 stan_fixed <- summary(fit, pars = c("alpha", "beta1", "beta2"),
                       probs = c(0.025, 0.5, 0.975))$summary
@@ -253,16 +342,18 @@ prior_beta2_sd    <- stan_fixed["beta2",  "sd"]
 
 ```
 
+This is the Bayesian updating. The Step 1 marginal posteriors for the three fixed effects are summarized to a Gaussian approximation, a mean and SD for each of $\alpha$, $\beta_1$, $\beta_2$, which will serve as informative priors in the INLA model.
 
+## Step 2: SPDE mesh, spatial field, and model formula
 
-```{r 70prior}
+```{r prior}
 
 # Convert SD to precision
 prec_alpha <- 1 / prior_alpha_sd^2
 prec_beta1 <- 1 / prior_beta1_sd^2
 prec_beta2 <- 1 / prior_beta2_sd^2
 
-# Build INLA-format priors from Stan posteriors
+# Build INLA format priors from Stan posteriors
 prior_alpha <- list(prior = "gaussian",
                     param = c(prior_alpha_mean, prec_alpha))
 
@@ -282,7 +373,7 @@ mesh <- inla.mesh.2d(loc.domain = NULL,
                      min.angle = 21,
                      cutoff = edge1/1,
                      offset = c(edge1,edge1*3),
-                     boundary = study_area, 
+                     boundary = study_area,
                      crs = st_crs(study_area))
 
 
@@ -290,868 +381,346 @@ spde <- inla.spde2.pcmatern(
   mesh  = mesh,
   #prior.range = c(500000, 0.05),
   #prior.sigma = c(1, 0.01)
-  prior.range = c(10, 0.05),   
-  prior.sigma = c(1, 0.05)    
+  prior.range = c(10, 0.05),
+  prior.sigma = c(1, 0.05)
 )
 iset  <- inla.spde.make.index("s", n.spde = spde$n.spde)
 formula <- y ~ -1 + intercept + x1 + x2 + f(s, model = spde)
 
 ```
 
+```{r shared-pred-stack}
+# The prediction grid does not depend on the occurrence data, so the projector
+# matrix and the prediction stack are built once here and reused for every
+# replicate and every removal level.
+coords_pred <- as.matrix(env_valid[, c("x", "y")])
+A_pred      <- inla.spde.make.A(mesh, loc = coords_pred)
+
+stack_pred <- inla.stack(
+  data    = list(y = NA),
+  A       = list(A_pred, 1),
+  effects = list(iset,
+                 data.frame(intercept = 1,
+                            x1 = env_valid$temp,
+                            x2 = env_valid$prec)),
+  tag = "pred"
+)
+
+# Non informative baseline prior, shared across all removal levels.
+prior.beta <- list(prec = list(default = 1/(1)^2, Intercept = 1/(20)^2),
+                   mean = list(default = 0, Intercept = 0))
+```
+
+This chunk and the one above build everything the Step 2 fits share. Like the priors, they are computed once: the mesh, SPDE, index, formula, prediction stack, and non informative prior do not depend on the occurrence data and are reused unchanged across all four removal levels and all replicates.
+
+---
+
+# 8. Simulation design
+
+What follows is a data thinning experiment repeated at four removal levels, **70 %, 90 %, 99 %, and 99.9 %** of the occurrence records deleted. At each level the Step 2 INLA model is fit twice on each thinned dataset:
+
+1. with the expert informed Gaussian priors carried over from Step 1, and
+2. with non informative priors.
+
+Because the mesh, SPDE prior, formula, and prediction grid are held fixed, the only thing that changes between blocks is `removal_pct`. This isolates two effects: how predictions degrade as data become scarce, and how much the Step 1 expert knowledge buffers that degradation. As `removal_pct` rises, the expert informed maps should stay closer to the Step 1 expectation, while the non informative maps revert toward the spatial prior mean with inflated posterior SD.
+
+---
+
+## Function to subsample
+
+```{r Function}
+# Number of independent thinning replicates averaged at each removal level.
+# Each replicate fits two INLA models (expert informed + non informative).
+n_rep <- 100
+
+random_subsample <- function(data, pct_remove, seed = NULL, verbose = TRUE) {
+  stopifnot(pct_remove > 0 && pct_remove < 100)
+  if (!is.null(seed)) set.seed(seed)
+
+  n_total  <- nrow(data)
+  n_keep   <- round(n_total * (1 - pct_remove / 100))
+  keep_idx <- sample(n_total, n_keep, replace = FALSE)
+
+  result <- data[keep_idx, ]
+
+  if (verbose) {
+    cat("=== Random subsampling ===\n")
+    cat(sprintf("  Original  : %d points\n", n_total))
+    cat(sprintf("  Removed   : %d points (%.1f%%)\n", n_total - n_keep, pct_remove))
+    cat(sprintf("  Remaining : %d points\n\n", nrow(result)))
+  }
+
+  result
+}
+```
 
 
-# 70% simulation
-## Update model with INLA - expert informed
+---
+
+## Replicate engine
+
+`run_thinning_replicates()` encapsulates one full Step 2 pipeline and repeats it `n_rep` times. For each replicate it draws an independent random subsample (a distinct, reproducible seed per replicate), attaches the standardized covariates, builds the estimation stack, joins it to the shared prediction stack, and fits the INLA model twice, once with the expert informed priors and once with the non informative prior. The per cell posterior mean and SD are stored for every replicate, and the function returns their average across replicates. It also returns the between replicate SD of the mean prediction, a direct measure of how much a single thinning draw would have wobbled.
+
+```{r replicate-engine}
+run_thinning_replicates <- function(data, removal_pct, n_rep = 100, base_seed = 10) {
+
+  n_cell <- sum(valid_idx)                        # number of prediction cells
+  ei_mean_mat <- matrix(NA_real_, n_cell, n_rep)  # expert informed posterior mean
+  ei_sd_mat   <- matrix(NA_real_, n_cell, n_rep)  # expert informed posterior SD
+  ni_mean_mat <- matrix(NA_real_, n_cell, n_rep)  # non informative posterior mean
+  ni_sd_mat   <- matrix(NA_real_, n_cell, n_rep)  # non informative posterior SD
+
+  for (r in seq_len(n_rep)) {
+
+    # 1. Independent thinned draw (distinct, reproducible seed per replicate)
+    monarch_sf <- random_subsample(data, removal_pct,
+                                   seed = base_seed + r, verbose = FALSE)
+
+    # 2. Attach standardized covariates to the thinned points
+    monarch_occ <- monarch_sf |>
+      mutate(y    = monarch_sf$presenc,
+             temp = terra::extract(env$temp, vect(monarch_sf))[, 2],
+             prec = terra::extract(env$prec, vect(monarch_sf))[, 2]) |>
+      select(c("y", "temp", "prec"))
+
+    inla_df <- data.frame(
+      y  = as.integer(monarch_occ$y),
+      x1 = monarch_occ$temp,
+      x2 = monarch_occ$prec
+    )
+
+    # 3. Estimation stack for this replicate (prediction stack is shared)
+    coords    <- as.matrix(sf::st_coordinates(monarch_occ))
+    A_est     <- inla.spde.make.A(mesh, loc = coords)
+    stack_est <- inla.stack(
+      data    = list(y = inla_df$y),
+      A       = list(A_est, 1),
+      effects = list(iset,
+                     data.frame(intercept = 1, x1 = inla_df$x1, x2 = inla_df$x2)),
+      tag     = "est"
+    )
+    stack_full <- inla.stack(stack_est, stack_pred)
+    idx_pred   <- inla.stack.index(stack_full, tag = "pred")$data
+
+    # 4a. Expert informed priors (carried over from Step 1)
+    fit_ei <- inla(
+      formula,
+      family = "binomial",
+      data   = inla.stack.data(stack_full),
+      control.fixed = list(
+        mean = list(intercept = prior_alpha_mean,
+                    x1        = prior_beta1_mean,
+                    x2        = prior_beta2_mean),
+        prec = list(intercept = prec_alpha,
+                    x1        = prec_beta1,
+                    x2        = prec_beta2)
+      ),
+      control.predictor = list(A = inla.stack.A(stack_full), compute = TRUE, link = 1),
+      control.compute   = list(dic = TRUE, waic = TRUE, config = TRUE)
+    )
+    ei_mean_mat[, r] <- fit_ei$summary.fitted.values[idx_pred, "mean"]
+    ei_sd_mat[, r]   <- fit_ei$summary.fitted.values[idx_pred, "sd"]
+
+    # 4b. Non informative priors
+    fit_ni <- inla(
+      formula,
+      family = "binomial",
+      data   = inla.stack.data(stack_full),
+      control.fixed = prior.beta,
+      control.predictor = list(A = inla.stack.A(stack_full), compute = TRUE, link = 1),
+      control.compute   = list(dic = TRUE, waic = TRUE, config = TRUE)
+    )
+    ni_mean_mat[, r] <- fit_ni$summary.fitted.values[idx_pred, "mean"]
+    ni_sd_mat[, r]   <- fit_ni$summary.fitted.values[idx_pred, "sd"]
+
+     
+  }
+  
+  list(
+    ei_mean            = rowMeans(ei_mean_mat),
+    ei_sd              = rowMeans(ei_sd_mat),
+    ni_mean            = rowMeans(ni_mean_mat),
+    ni_sd              = rowMeans(ni_sd_mat),
+    ei_mean_between_sd = apply(ei_mean_mat, 1, sd),  
+    ni_mean_between_sd = apply(ni_mean_mat, 1, sd)
+    
+  )
+
+}
+```
+
+`plot_sim_maps()` rasterises a replicate averaged prediction/SD pair onto the study grid and draws the two maps.
+
+```{r plot-helper}
+plot_sim_maps <- function(pred_vec, sd_vec, title_pred, title_sd, pred_range = c(0, 1), removal_pct_txt, model_type) {
+  pred_raster <- rast(env$temp)
+  values(pred_raster) <- NA
+  pred_raster[valid_idx] <- pred_vec
+  pred_cropped <- crop(pred_raster, ext(trim(pred_raster)))
+  
+  writeRaster(pred_cropped, paste0("C:/Users/maria/Documents/GitHub/Expert_SDM/results/Models/simulation/",   removal_pct_txt, "_", model_type,"_SDM_PA.tif"), overwrite=TRUE)
+  
+  
+  sd_raster <- rast(env$temp)
+  values(sd_raster) <- NA
+  sd_raster[valid_idx] <- sd_vec
+  sd_cropped <- crop(sd_raster, ext(trim(sd_raster)))
+  
+  writeRaster(sd_cropped, paste0("C:/Users/maria/Documents/GitHub/Expert_SDM/results/Models/simulation/", removal_pct_txt, "_", model_type,"_sd_PA.tif"), overwrite=TRUE)
+  
+  
+  pred_prj <- project(pred_cropped, map_epsg)
+  plot(pred_prj,
+       main  = title_pred,
+       col   = hcl.colors(100, "YlGnBu"),
+       range = pred_range,
+       axes  = FALSE,
+       box   = FALSE)
+
+  png(file=paste0("C:/Users/maria/Documents/GitHub/Expert_SDM/results/Models/simulation/",   removal_pct_txt, "_", model_type,"_SDM_PA.png"),
+    width=600, height=350)
+  plot(pred_prj,
+     main = title_pred,
+     col  = hcl.colors(100, "YlGnBu"),
+     range = c(0, 1),
+     axes   = FALSE,
+     box    = FALSE)
+  dev.off()
+  
+  
+  sd_prj <- project(sd_cropped, map_epsg)
+  plot(sd_prj,
+       col  = hcl.colors(100, "Reds"),
+       axes = FALSE,
+       box  = FALSE)
+  
+png(file=paste0("C:/Users/maria/Documents/GitHub/Expert_SDM/results/Models/simulation/",   removal_pct_txt, "_", model_type,"_sd_PA.png"),
+    width=600, height=350)
+ plot(sd_prj,
+       col  = hcl.colors(100, "Reds"),
+       axes = FALSE,
+       box  = FALSE)
+  dev.off()
+    
+}
+```
+
+---
+
+## 70 % removal
+
+Runs the Step 2 pipeline `r n_rep` times on independent 70 % thinned draws and averages the prediction and SD maps across replicates.
 
 ```{r 70}
-# ----
-removal_pct   <- 70
+removal_pct     <- 70
 removal_pct_txt <- gsub("\\.", "_", as.character(removal_pct))
-monarch_sf <- st_read(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/data/species/simulation/PA/", "SF_", removal_pct_txt, "_monarch.shp"))
-# ----
+
+sim_70 <- run_thinning_replicates(monarch_sf0, removal_pct, n_rep = n_rep)
 ```
 
-
-## INLA model - expert informed priors
-
-
-```{r 70join-env-occ}
-
-monarch_occ <- monarch_sf |>
-  mutate(y = monarch_sf$presenc,
-         temp = terra::extract(env$temp, vect(monarch_sf))[,2],
-         prec = terra::extract(env$prec, vect(monarch_sf))[,2]) |>
-  select(c("y","temp","prec"))
-
-head(monarch_occ, 5)
-
-```
-
-
-```{r 70inla_df}
-
-inla_df <- data.frame(
-  y  = as.integer(monarch_occ$y),   
-  x1 = monarch_occ$temp,       
-  x2 = monarch_occ$prec
-)
-
-
-```
-
-
-```{r 70spde}
-coords <- as.matrix(sf::st_coordinates(monarch_occ))
-
-A_est <- inla.spde.make.A(mesh, loc = coords)
-
-stack_est <- inla.stack(
-  data    = list(y = inla_df$y),
-  A       = list(A_est, 1),
-  effects = list(iset,
-                 data.frame(intercept = 1,
-                            x1 = inla_df$x1,
-                            x2 = inla_df$x2)),
-  tag     = "est"
-)
-
-coords_pred <- as.matrix(env_valid[, c("x", "y")])
-
-# Projector matrix for prediction locations
-A_pred <- inla.spde.make.A(mesh, loc = coords_pred)
-
-stack_pred <- inla.stack(
-  data    = list(y = NA),
-  A       = list(A_pred, 1),
-  effects = list(
-    iset,
-    data.frame(intercept = 1,
-               x1 = env_valid$temp,
-               x2 = env_valid$prec)
-  ),
-  tag = "pred"
-)
-
-# Join estimation + prediction stacks
-stack_full <- inla.stack(stack_est, stack_pred)
-
-```
-
-
-
-```{r 70pred-INLA}
-
-# Refit on full stack
-fit_inla_full <- inla(
-  formula,
-  family = "binomial",
-  data   = inla.stack.data(stack_full),
-
-  control.fixed = list(
-    mean = list(intercept = prior_alpha_mean,
-                x1        = prior_beta1_mean,
-                x2        = prior_beta2_mean),
-    prec = list(intercept = prec_alpha,
-                x1        = prec_beta1,
-                x2        = prec_beta2)
-  ),
-
-  control.predictor = list(
-    A       = inla.stack.A(stack_full),
-    compute = TRUE,
-    link    = 1
-  ),
-
-  control.compute = list(dic = TRUE, waic = TRUE, config = TRUE)
-)
-
-# Extract predictions for pred stack only
-idx_pred   <- inla.stack.index(stack_full, tag = "pred")$data
-
-pred_mean  <- fit_inla_full$summary.fitted.values[idx_pred, "mean"]
-pred_sd    <- fit_inla_full$summary.fitted.values[idx_pred, "sd"]
-```
-
+### Expert informed priors: replicate averaged maps
 
 ```{r 70Plot-INLA}
-pred_raster <- rast(env$temp)
-values(pred_raster) <- NA
-pred_raster[valid_idx] <- pred_mean
-
-sd_raster <- rast(env$temp)
-values(sd_raster) <- NA
-sd_raster[valid_idx] <- pred_sd
-
-non_na_extent <- ext(trim(pred_raster))
-pred_cropped <- crop(pred_raster, non_na_extent)
-png(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/", "pred_", removal_pct_txt, ".png"), width = 800, height = 800, res = 120)
-plot(pred_cropped,
-     main = "Model update - Species Distribution Model",
-     col  = hcl.colors(100, "YlGnBu"),
-     range = c(0, 1),
-     axes   = FALSE,
-     box    = FALSE)
-dev.off()
-
-non_na_extent <- ext(trim(sd_raster))
-sd_cropped <- crop(sd_raster, non_na_extent)
-
-png(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/", "SD_", removal_pct_txt, ".png"), width = 800, height = 800, res = 120)
-plot(sd_cropped,
-     main = "Model update - Uncertainty (posterior SD)",
-     col  = hcl.colors(100, "Reds"),
-     axes   = FALSE,
-     box    = FALSE)
-dev.off()
+map <- plot_sim_maps(sim_70$ei_mean, sim_70$ei_sd,
+              title_pred = "Species Distribution Model (Model update)",
+              title_sd   = "Uncertainty (Model update)", removal_pct_txt = removal_pct_txt, model_type = "EK")
+map
 ```
 
+### Non informative priors: replicate averaged maps
 
-# INLA model - non informed priors
-
-```{r 70prior-NonInfo}
-
-prior.beta <- list(prec = list(default = 1/(1)^2, Intercept = 1/(20)^2), 
-                   mean = list(default = 0, Intercept = 0))
-
+```{r 70Plot-NonInfo}
+plot_sim_maps(sim_70$ni_mean, sim_70$ni_sd,
+              title_pred = "Species Distribution Model (Non informative)",
+              title_sd   = "Uncertainty (Non informative)", removal_pct_txt = removal_pct_txt, model_type = "NI")
 ```
 
+---
 
+## 90 % removal
 
-```{r 70full-NonInfo}
-fit_inla_full <- inla(
-  formula,
-  family = "binomial",
-  data   = inla.stack.data(stack_full),
-  control.fixed = prior.beta,
-  control.predictor = list(
-    A       = inla.stack.A(stack_full),
-    compute = TRUE,
-    link    = 1
-  ),
+Runs the Step 2 pipeline `r n_rep` times on independent 90 % thinned draws and averages the prediction and SD maps across replicates.
 
-  control.compute = list(dic = TRUE, waic = TRUE, config = TRUE)
-)
-
-# Extract predictions for pred stack only
-idx_pred   <- inla.stack.index(stack_full, tag = "pred")$data
-
-pred_mean  <- fit_inla_full$summary.fitted.values[idx_pred, "mean"]
-pred_sd    <- fit_inla_full$summary.fitted.values[idx_pred, "sd"]
-
-
-```
-
-
-```{r 70Plot--NonInfo}
-pred_raster <- rast(env$temp)
-values(pred_raster) <- NA
-pred_raster[valid_idx] <- pred_mean
-
-sd_raster <- rast(env$temp)
-values(sd_raster) <- NA
-sd_raster[valid_idx] <- pred_sd
-
-non_na_extent <- ext(trim(pred_raster))
-pred_cropped <- crop(pred_raster, non_na_extent)
-png(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/", "NI_pred_", removal_pct_txt, ".png"), width = 800, height = 800, res = 120)
-plot(pred_cropped,
-     main = "Non informative - Species Distribution Model",
-     col  = hcl.colors(100, "YlGnBu"),
-     range = c(0, 1),
-     axes   = FALSE,
-     box    = FALSE)
-dev.off()
-
-non_na_extent <- ext(trim(sd_raster))
-sd_cropped <- crop(sd_raster, non_na_extent)
-png(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/", "NI_SD_", removal_pct_txt, ".png"), width = 800, height = 800, res = 120)
-plot(sd_cropped,
-     main = "Non informative - Uncertainty (posterior SD)",
-     col  = hcl.colors(100, "Reds"),
-     axes   = FALSE,
-     box    = FALSE)
-dev.off()
-```
-
-
-# 90% simulation
 ```{r 90}
-# ----
-removal_pct   <- 90
+removal_pct     <- 90
 removal_pct_txt <- gsub("\\.", "_", as.character(removal_pct))
-monarch_sf <- st_read(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/data/species/simulation/PA/", "SF_", removal_pct_txt, "_monarch.shp"))
-# ----
+
+sim_90 <- run_thinning_replicates(monarch_sf0, removal_pct, n_rep = n_rep)
 ```
 
-
-## INLA model - expert informed priors
-
-
-```{r 90join-env-occ}
-
-monarch_occ <- monarch_sf |>
-  mutate(y = monarch_sf$presenc,
-         temp = terra::extract(env$temp, vect(monarch_sf))[,2],
-         prec = terra::extract(env$prec, vect(monarch_sf))[,2]) |>
-  select(c("y","temp","prec"))
-
-head(monarch_occ, 5)
-
-```
-
-
-```{r 90inla_df}
-
-inla_df <- data.frame(
-  y  = as.integer(monarch_occ$y),   
-  x1 = monarch_occ$temp,       
-  x2 = monarch_occ$prec
-)
-
-
-```
-
-
-```{r 90spde}
-coords <- as.matrix(sf::st_coordinates(monarch_occ))
-
-A_est <- inla.spde.make.A(mesh, loc = coords)
-
-stack_est <- inla.stack(
-  data    = list(y = inla_df$y),
-  A       = list(A_est, 1),
-  effects = list(iset,
-                 data.frame(intercept = 1,
-                            x1 = inla_df$x1,
-                            x2 = inla_df$x2)),
-  tag     = "est"
-)
-
-coords_pred <- as.matrix(env_valid[, c("x", "y")])
-
-# Projector matrix for prediction locations
-A_pred <- inla.spde.make.A(mesh, loc = coords_pred)
-
-stack_pred <- inla.stack(
-  data    = list(y = NA),
-  A       = list(A_pred, 1),
-  effects = list(
-    iset,
-    data.frame(intercept = 1,
-               x1 = env_valid$temp,
-               x2 = env_valid$prec)
-  ),
-  tag = "pred"
-)
-
-# Join estimation + prediction stacks
-stack_full <- inla.stack(stack_est, stack_pred)
-
-```
-
-
-
-```{r 90pred-INLA}
-
-# Refit on full stack
-fit_inla_full <- inla(
-  formula,
-  family = "binomial",
-  data   = inla.stack.data(stack_full),
-
-  control.fixed = list(
-    mean = list(intercept = prior_alpha_mean,
-                x1        = prior_beta1_mean,
-                x2        = prior_beta2_mean),
-    prec = list(intercept = prec_alpha,
-                x1        = prec_beta1,
-                x2        = prec_beta2)
-  ),
-
-  control.predictor = list(
-    A       = inla.stack.A(stack_full),
-    compute = TRUE,
-    link    = 1
-  ),
-
-  control.compute = list(dic = TRUE, waic = TRUE, config = TRUE)
-)
-
-# Extract predictions for pred stack only
-idx_pred   <- inla.stack.index(stack_full, tag = "pred")$data
-
-pred_mean  <- fit_inla_full$summary.fitted.values[idx_pred, "mean"]
-pred_sd    <- fit_inla_full$summary.fitted.values[idx_pred, "sd"]
-```
-
+### Expert informed priors: replicate averaged maps
 
 ```{r 90Plot-INLA}
-pred_raster <- rast(env$temp)
-values(pred_raster) <- NA
-pred_raster[valid_idx] <- pred_mean
-
-sd_raster <- rast(env$temp)
-values(sd_raster) <- NA
-sd_raster[valid_idx] <- pred_sd
-
-non_na_extent <- ext(trim(pred_raster))
-pred_cropped <- crop(pred_raster, non_na_extent)
-png(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/", "pred_", removal_pct_txt, ".png"), width = 800, height = 800, res = 120)
-plot(pred_cropped,
-     main = "Model update - Species Distribution Model",
-     col  = hcl.colors(100, "YlGnBu"),
-     range = c(0, 1),
-     axes   = FALSE,
-     box    = FALSE)
-dev.off()
-
-non_na_extent <- ext(trim(sd_raster))
-sd_cropped <- crop(sd_raster, non_na_extent)
-
-png(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/", "SD_", removal_pct_txt, ".png"), width = 800, height = 800, res = 120)
-plot(sd_cropped,
-     main = "Model update - Uncertainty (posterior SD)",
-     col  = hcl.colors(100, "Reds"),
-     axes   = FALSE,
-     box    = FALSE)
-dev.off()
+plot_sim_maps(sim_90$ei_mean, sim_90$ei_sd,
+              title_pred = "Species Distribution Model (Model update)",
+              title_sd   = "Uncertainty (Model update)", removal_pct_txt = removal_pct_txt, model_type = "EK")
 ```
 
+### Non informative priors: replicate averaged maps
 
-# INLA model - non informed priors
-
-```{r 90prior-NonInfo}
-
-prior.beta <- list(prec = list(default = 1/(1)^2, Intercept = 1/(20)^2), 
-                   mean = list(default = 0, Intercept = 0))
-
+```{r 90Plot-NonInfo}
+plot_sim_maps(sim_90$ni_mean, sim_90$ni_sd,
+              title_pred = "Species Distribution Model (Non informative)",
+              title_sd   = "Uncertainty (Non informative)", removal_pct_txt = removal_pct_txt, model_type = "NI")
 ```
 
+---
 
+## 99 % removal
 
-```{r 90full-NonInfo}
-fit_inla_full <- inla(
-  formula,
-  family = "binomial",
-  data   = inla.stack.data(stack_full),
-  control.fixed = prior.beta,
-  control.predictor = list(
-    A       = inla.stack.A(stack_full),
-    compute = TRUE,
-    link    = 1
-  ),
+Runs the Step 2 pipeline `r n_rep` times on independent 99 % thinned draws and averages the prediction and SD maps across replicates.
 
-  control.compute = list(dic = TRUE, waic = TRUE, config = TRUE)
-)
-
-# Extract predictions for pred stack only
-idx_pred   <- inla.stack.index(stack_full, tag = "pred")$data
-
-pred_mean  <- fit_inla_full$summary.fitted.values[idx_pred, "mean"]
-pred_sd    <- fit_inla_full$summary.fitted.values[idx_pred, "sd"]
-
-
-```
-
-
-```{r 90Plot--NonInfo}
-pred_raster <- rast(env$temp)
-values(pred_raster) <- NA
-pred_raster[valid_idx] <- pred_mean
-
-sd_raster <- rast(env$temp)
-values(sd_raster) <- NA
-sd_raster[valid_idx] <- pred_sd
-
-non_na_extent <- ext(trim(pred_raster))
-pred_cropped <- crop(pred_raster, non_na_extent)
-png(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/", "NI_pred_", removal_pct_txt, ".png"), width = 800, height = 800, res = 120)
-plot(pred_cropped,
-     main = "Non informative - Species Distribution Model",
-     col  = hcl.colors(100, "YlGnBu"),
-     range = c(0, 1),
-     axes   = FALSE,
-     box    = FALSE)
-dev.off()
-
-non_na_extent <- ext(trim(sd_raster))
-sd_cropped <- crop(sd_raster, non_na_extent)
-png(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/", "NI_SD_", removal_pct_txt, ".png"), width = 800, height = 800, res = 120)
-plot(sd_cropped,
-     main = "Non informative - Uncertainty (posterior SD)",
-     col  = hcl.colors(100, "Reds"),
-     axes   = FALSE,
-     box    = FALSE)
-dev.off()
-```
-
-# 99% simulation
-## Update model with INLA - expert informed
 
 ```{r 99}
-# ----
-removal_pct   <- 99
+removal_pct     <- 99
 removal_pct_txt <- gsub("\\.", "_", as.character(removal_pct))
-monarch_sf <- st_read(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/data/species/simulation/PA/", "SF_", removal_pct_txt, "_monarch.shp"))
-# ----
+
+sim_99 <- run_thinning_replicates(monarch_sf0, removal_pct, n_rep = n_rep)
 ```
 
-
-## INLA model - expert informed priors
-
-
-```{r 99join-env-occ}
-
-monarch_occ <- monarch_sf |>
-  mutate(y = monarch_sf$presenc,
-         temp = terra::extract(env$temp, vect(monarch_sf))[,2],
-         prec = terra::extract(env$prec, vect(monarch_sf))[,2]) |>
-  select(c("y","temp","prec"))
-
-head(monarch_occ, 5)
-
-```
-
-
-```{r 99inla_df}
-
-inla_df <- data.frame(
-  y  = as.integer(monarch_occ$y),   
-  x1 = monarch_occ$temp,       
-  x2 = monarch_occ$prec
-)
-
-
-```
-
-
-```{r 99spde}
-coords <- as.matrix(sf::st_coordinates(monarch_occ))
-
-A_est <- inla.spde.make.A(mesh, loc = coords)
-
-stack_est <- inla.stack(
-  data    = list(y = inla_df$y),
-  A       = list(A_est, 1),
-  effects = list(iset,
-                 data.frame(intercept = 1,
-                            x1 = inla_df$x1,
-                            x2 = inla_df$x2)),
-  tag     = "est"
-)
-
-coords_pred <- as.matrix(env_valid[, c("x", "y")])
-
-# Projector matrix for prediction locations
-A_pred <- inla.spde.make.A(mesh, loc = coords_pred)
-
-stack_pred <- inla.stack(
-  data    = list(y = NA),
-  A       = list(A_pred, 1),
-  effects = list(
-    iset,
-    data.frame(intercept = 1,
-               x1 = env_valid$temp,
-               x2 = env_valid$prec)
-  ),
-  tag = "pred"
-)
-
-# Join estimation + prediction stacks
-stack_full <- inla.stack(stack_est, stack_pred)
-
-```
-
-
-
-```{r 99pred-INLA}
-
-# Refit on full stack
-fit_inla_full <- inla(
-  formula,
-  family = "binomial",
-  data   = inla.stack.data(stack_full),
-
-  control.fixed = list(
-    mean = list(intercept = prior_alpha_mean,
-                x1        = prior_beta1_mean,
-                x2        = prior_beta2_mean),
-    prec = list(intercept = prec_alpha,
-                x1        = prec_beta1,
-                x2        = prec_beta2)
-  ),
-
-  control.predictor = list(
-    A       = inla.stack.A(stack_full),
-    compute = TRUE,
-    link    = 1
-  ),
-
-  control.compute = list(dic = TRUE, waic = TRUE, config = TRUE)
-)
-
-# Extract predictions for pred stack only
-idx_pred   <- inla.stack.index(stack_full, tag = "pred")$data
-
-pred_mean  <- fit_inla_full$summary.fitted.values[idx_pred, "mean"]
-pred_sd    <- fit_inla_full$summary.fitted.values[idx_pred, "sd"]
-```
-
+### Expert informed priors: replicate averaged maps
 
 ```{r 99Plot-INLA}
-pred_raster <- rast(env$temp)
-values(pred_raster) <- NA
-pred_raster[valid_idx] <- pred_mean
-
-sd_raster <- rast(env$temp)
-values(sd_raster) <- NA
-sd_raster[valid_idx] <- pred_sd
-
-non_na_extent <- ext(trim(pred_raster))
-pred_cropped <- crop(pred_raster, non_na_extent)
-png(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/", "pred_", removal_pct_txt, ".png"), width = 800, height = 800, res = 120)
-plot(pred_cropped,
-     main = "Model update - Species Distribution Model",
-     col  = hcl.colors(100, "YlGnBu"),
-     range = c(0, 1),
-     axes   = FALSE,
-     box    = FALSE)
-dev.off()
-
-non_na_extent <- ext(trim(sd_raster))
-sd_cropped <- crop(sd_raster, non_na_extent)
-
-png(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/", "SD_", removal_pct_txt, ".png"), width = 800, height = 800, res = 120)
-plot(sd_cropped,
-     main = "Model update - Uncertainty (posterior SD)",
-     col  = hcl.colors(100, "Reds"),
-     axes   = FALSE,
-     box    = FALSE)
-dev.off()
+plot_sim_maps(sim_99$ei_mean, sim_99$ei_sd,
+              title_pred = "Species Distribution Model (Model update)",
+              title_sd   = "Uncertainty (Model update)", removal_pct_txt = removal_pct_txt, model_type = "EK")
 ```
 
+### Non informative priors: replicate averaged maps
 
-# INLA model - non informed priors
-
-```{r 99prior-NonInfo}
-
-prior.beta <- list(prec = list(default = 1/(1)^2, Intercept = 1/(20)^2), 
-                   mean = list(default = 0, Intercept = 0))
-
+```{r 99Plot-NonInfo}
+plot_sim_maps(sim_99$ni_mean, sim_99$ni_sd,
+              title_pred = "Species Distribution Model (Non informative)",
+              title_sd   = "Uncertainty (Non informative)", removal_pct_txt = removal_pct_txt, model_type = "NI")
 ```
 
+---
+
+## 99.9 % removal
+
+Runs the Step 2 pipeline `r n_rep` times on independent 99.9 % thinned draws and averages the prediction and SD maps across replicates.
 
 
-```{r 99full-NonInfo}
-fit_inla_full <- inla(
-  formula,
-  family = "binomial",
-  data   = inla.stack.data(stack_full),
-  control.fixed = prior.beta,
-  control.predictor = list(
-    A       = inla.stack.A(stack_full),
-    compute = TRUE,
-    link    = 1
-  ),
-
-  control.compute = list(dic = TRUE, waic = TRUE, config = TRUE)
-)
-
-# Extract predictions for pred stack only
-idx_pred   <- inla.stack.index(stack_full, tag = "pred")$data
-
-pred_mean  <- fit_inla_full$summary.fitted.values[idx_pred, "mean"]
-pred_sd    <- fit_inla_full$summary.fitted.values[idx_pred, "sd"]
-
-
-```
-
-
-```{r 99Plot--NonInfo}
-pred_raster <- rast(env$temp)
-values(pred_raster) <- NA
-pred_raster[valid_idx] <- pred_mean
-
-sd_raster <- rast(env$temp)
-values(sd_raster) <- NA
-sd_raster[valid_idx] <- pred_sd
-
-non_na_extent <- ext(trim(pred_raster))
-pred_cropped <- crop(pred_raster, non_na_extent)
-png(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/", "NI_pred_", removal_pct_txt, ".png"), width = 800, height = 800, res = 120)
-plot(pred_cropped,
-     main = "Non informative - Species Distribution Model",
-     col  = hcl.colors(100, "YlGnBu"),
-     range = c(0, 1),
-     axes   = FALSE,
-     box    = FALSE)
-dev.off()
-
-non_na_extent <- ext(trim(sd_raster))
-sd_cropped <- crop(sd_raster, non_na_extent)
-png(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/", "NI_SD_", removal_pct_txt, ".png"), width = 800, height = 800, res = 120)
-plot(sd_cropped,
-     main = "Non informative - Uncertainty (posterior SD)",
-     col  = hcl.colors(100, "Reds"),
-     axes   = FALSE,
-     box    = FALSE)
-dev.off()
-```
-
-
-# 99.9% simulation
-## Update model with INLA - expert informed
 ```{r 999}
-# ----
-removal_pct   <- 99.9
+removal_pct     <- 99.9
 removal_pct_txt <- gsub("\\.", "_", as.character(removal_pct))
-monarch_sf <- st_read(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/data/species/simulation/PA/", "SF_", removal_pct_txt, "_monarch.shp"))
-# ----
+
+sim_999 <- run_thinning_replicates(monarch_sf0, removal_pct, n_rep = n_rep)
 ```
 
-
-## INLA model - expert informed priors
-
-
-```{r 999join-env-occ}
-
-monarch_occ <- monarch_sf |>
-  mutate(y = monarch_sf$presenc,
-         temp = terra::extract(env$temp, vect(monarch_sf))[,2],
-         prec = terra::extract(env$prec, vect(monarch_sf))[,2]) |>
-  select(c("y","temp","prec"))
-
-head(monarch_occ, 5)
-
-```
-
-
-```{r 999inla_df}
-
-inla_df <- data.frame(
-  y  = as.integer(monarch_occ$y),   
-  x1 = monarch_occ$temp,       
-  x2 = monarch_occ$prec
-)
-
-
-```
-
-
-```{r 999spde}
-coords <- as.matrix(sf::st_coordinates(monarch_occ))
-
-A_est <- inla.spde.make.A(mesh, loc = coords)
-
-stack_est <- inla.stack(
-  data    = list(y = inla_df$y),
-  A       = list(A_est, 1),
-  effects = list(iset,
-                 data.frame(intercept = 1,
-                            x1 = inla_df$x1,
-                            x2 = inla_df$x2)),
-  tag     = "est"
-)
-
-coords_pred <- as.matrix(env_valid[, c("x", "y")])
-
-# Projector matrix for prediction locations
-A_pred <- inla.spde.make.A(mesh, loc = coords_pred)
-
-stack_pred <- inla.stack(
-  data    = list(y = NA),
-  A       = list(A_pred, 1),
-  effects = list(
-    iset,
-    data.frame(intercept = 1,
-               x1 = env_valid$temp,
-               x2 = env_valid$prec)
-  ),
-  tag = "pred"
-)
-
-# Join estimation + prediction stacks
-stack_full <- inla.stack(stack_est, stack_pred)
-
-```
-
-
-
-```{r 999pred-INLA}
-
-# Refit on full stack
-fit_inla_full <- inla(
-  formula,
-  family = "binomial",
-  data   = inla.stack.data(stack_full),
-
-  control.fixed = list(
-    mean = list(intercept = prior_alpha_mean,
-                x1        = prior_beta1_mean,
-                x2        = prior_beta2_mean),
-    prec = list(intercept = prec_alpha,
-                x1        = prec_beta1,
-                x2        = prec_beta2)
-  ),
-
-  control.predictor = list(
-    A       = inla.stack.A(stack_full),
-    compute = TRUE,
-    link    = 1
-  ),
-
-  control.compute = list(dic = TRUE, waic = TRUE, config = TRUE)
-)
-
-# Extract predictions for pred stack only
-idx_pred   <- inla.stack.index(stack_full, tag = "pred")$data
-
-pred_mean  <- fit_inla_full$summary.fitted.values[idx_pred, "mean"]
-pred_sd    <- fit_inla_full$summary.fitted.values[idx_pred, "sd"]
-```
-
+### Expert informed priors: replicate averaged maps
 
 ```{r 999Plot-INLA}
-pred_raster <- rast(env$temp)
-values(pred_raster) <- NA
-pred_raster[valid_idx] <- pred_mean
-
-sd_raster <- rast(env$temp)
-values(sd_raster) <- NA
-sd_raster[valid_idx] <- pred_sd
-
-non_na_extent <- ext(trim(pred_raster))
-pred_cropped <- crop(pred_raster, non_na_extent)
-png(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/", "pred_", removal_pct_txt, ".png"), width = 800, height = 800, res = 120)
-plot(pred_cropped,
-     main = "Model update - Species Distribution Model",
-     col  = hcl.colors(100, "YlGnBu"),
-     range = c(0, 1),
-     axes   = FALSE,
-     box    = FALSE)
-dev.off()
-
-non_na_extent <- ext(trim(sd_raster))
-sd_cropped <- crop(sd_raster, non_na_extent)
-
-png(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/", "SD_", removal_pct_txt, ".png"), width = 800, height = 800, res = 120)
-plot(sd_cropped,
-     main = "Model update - Uncertainty (posterior SD)",
-     col  = hcl.colors(100, "Reds"),
-     axes   = FALSE,
-     box    = FALSE)
-dev.off()
+plot_sim_maps(sim_999$ei_mean, sim_999$ei_sd,
+              title_pred = "Species Distribution Model (Model update)",
+              title_sd   = "Uncertainty (Model update)", removal_pct_txt = removal_pct_txt, model_type = "EK")
 ```
 
+### Non informative priors: replicate averaged maps
 
-# INLA model - non informed priors
-
-```{r 999prior-NonInfo}
-
-prior.beta <- list(prec = list(default = 1/(1)^2, Intercept = 1/(20)^2), 
-                   mean = list(default = 0, Intercept = 0))
-
+```{r 999Plot-NonInfo}
+plot_sim_maps(sim_999$ni_mean, sim_999$ni_sd,
+              title_pred = "Species Distribution Model (Non informative)",
+              title_sd   = "Uncertainty (Non informative)", removal_pct_txt = removal_pct_txt, model_type = "NI")
 ```
 
-
-
-```{r 999full-NonInfo}
-fit_inla_full <- inla(
-  formula,
-  family = "binomial",
-  data   = inla.stack.data(stack_full),
-  control.fixed = prior.beta,
-  control.predictor = list(
-    A       = inla.stack.A(stack_full),
-    compute = TRUE,
-    link    = 1
-  ),
-
-  control.compute = list(dic = TRUE, waic = TRUE, config = TRUE)
-)
-
-# Extract predictions for pred stack only
-idx_pred   <- inla.stack.index(stack_full, tag = "pred")$data
-
-pred_mean  <- fit_inla_full$summary.fitted.values[idx_pred, "mean"]
-pred_sd    <- fit_inla_full$summary.fitted.values[idx_pred, "sd"]
-
-
-```
-
-
-```{r 999Plot--NonInfo}
-pred_raster <- rast(env$temp)
-values(pred_raster) <- NA
-pred_raster[valid_idx] <- pred_mean
-
-sd_raster <- rast(env$temp)
-values(sd_raster) <- NA
-sd_raster[valid_idx] <- pred_sd
-
-non_na_extent <- ext(trim(pred_raster))
-pred_cropped <- crop(pred_raster, non_na_extent)
-png(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/", "NI_pred_", removal_pct_txt, ".png"), width = 800, height = 800, res = 120)
-plot(pred_cropped,
-     main = "Non informative - Species Distribution Model",
-     col  = hcl.colors(100, "YlGnBu"),
-     range = c(0, 1),
-     axes   = FALSE,
-     box    = FALSE)
-dev.off()
-
-non_na_extent <- ext(trim(sd_raster))
-sd_cropped <- crop(sd_raster, non_na_extent)
-png(paste0("C:/Users/maria/Documents/Chapter1/bayesian_model/results/", "NI_SD_", removal_pct_txt, ".png"), width = 800, height = 800, res = 120)
-plot(sd_cropped,
-     main = "Non informative - Uncertainty (posterior SD)",
-     col  = hcl.colors(100, "Reds"),
-     axes   = FALSE,
-     box    = FALSE)
-dev.off()
-
-```
-
-```{r }
-
-```
