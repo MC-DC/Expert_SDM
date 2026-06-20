@@ -84,6 +84,8 @@ Prediction maps and uncertainty (SD) maps are saved to `results/` for both the e
 The complete workflow, code, figures, and example results are available in the
 [rendered HTML documentation](https://mc-dc.github.io/Expert_SDM/).
 
+Results of the data thinning simulitions, to show how the use of expert knowldge improve the results when there is less and less data available are available in the [rendered HTML documentation](https://mc-dc.github.io/Expert_SDM/simulation-analysis.html).
+
 ## Author
 
 M. Camila Diaz-Corzo
