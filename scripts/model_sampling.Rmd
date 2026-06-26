@@ -52,8 +52,8 @@ library(terra)
 
 ```{r load-data}
 
-epsg = 3857
-epsg_crs = "EPSG:3857"
+epsg = 6622
+epsg_crs = "EPSG:6622"
 
 map_crs <- 4326
 map_epsg <- "EPSG:4326"
